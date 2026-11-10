@@ -9,6 +9,10 @@
 let clickStage = 0;
 let travelRows = [];
 let pendingConfig = null;   // saved configuration staged until its data finishes loading
+let savedConfigs = [];      // published configurations listed in configs/index.json
+let savedConfigReq = 0;     // guards against out-of-order saved-config fetches
+
+const SAVED_CONFIG_BASE = 'configs/';
 
 /* ============================================================
    Baseline reference construction (per gage)
@@ -896,6 +900,11 @@ function saveConfig() {
   showStatus('Configuration saved (<strong>' + a.download + '</strong>) — gages, data window, event window, baselines, gap fills, volume basis and lag. Restore it any time with <strong>Load Config</strong>.', 'success');
 }
 
+function isUsaceConfig(cfg) {
+  return !!(cfg && cfg.app === 'USACE Release Analysis' &&
+    Array.isArray(cfg.rows) && cfg.rows.length >= 2);
+}
+
 function loadConfigFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
@@ -906,7 +915,7 @@ function loadConfigFile(file) {
       showStatus('Could not read configuration: the file is not valid JSON.', 'error');
       return;
     }
-    if (!cfg || cfg.app !== 'USACE Release Analysis' || !Array.isArray(cfg.rows) || cfg.rows.length < 2) {
+    if (!isUsaceConfig(cfg)) {
       showStatus('Could not load configuration: this is not a USACE Release Analysis configuration file (missing "app" or "rows").', 'error');
       return;
     }
@@ -914,6 +923,98 @@ function loadConfigFile(file) {
   };
   reader.onerror = () => showStatus('Could not read the configuration file.', 'error');
   reader.readAsText(file);
+}
+
+/* ---------- Published configurations (configs/index.json) ----------
+   Static configs shipped with the site.  Users pick one from the
+   dropdown in Step 1; the JSON is fetched from the same origin and
+   fed through the normal Load Config pipeline. */
+
+function normalizeSavedConfigIndex(data) {
+  const list = Array.isArray(data)
+    ? data
+    : (data && Array.isArray(data.configs) ? data.configs : []);
+  const seen = new Set();
+  const out = [];
+  for (const entry of list) {
+    if (!entry || typeof entry.file !== 'string') continue;
+    const file = entry.file.trim().replace(/\\/g, '/').replace(/^\.?\//, '');
+    // Only permit simple relative JSON paths inside configs/.
+    if (!file || file.length > 200 || file.indexOf('..') >= 0 ||
+        !/^[A-Za-z0-9][A-Za-z0-9._/-]*\.json$/i.test(file)) continue;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const label = entry.label == null ? '' : String(entry.label).trim();
+    out.push({
+      label: label || file,
+      file: file,
+      description: entry.description == null ? '' : String(entry.description).trim()
+    });
+  }
+  return out;
+}
+
+function savedConfigUrl(file) {
+  return SAVED_CONFIG_BASE + String(file).split('/').map(encodeURIComponent).join('/');
+}
+
+async function loadSavedConfigIndex() {
+  const sel = document.getElementById('savedConfigSelect');
+  if (!sel) return;
+  if (typeof fetch !== 'function') {
+    sel.innerHTML = '<option value="">Saved configurations unavailable</option>';
+    sel.title = 'Serve the app over HTTP to load published configurations.';
+    return;
+  }
+  savedConfigs = [];
+  sel.disabled = true;
+  sel.innerHTML = '<option value="">Loading saved configurations…</option>';
+  try {
+    const res = await fetch(SAVED_CONFIG_BASE + 'index.json', { cache: 'no-cache' });
+    if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'error'));
+    savedConfigs = normalizeSavedConfigIndex(await res.json());
+    if (!savedConfigs.length) {
+      sel.innerHTML = '<option value="">No saved configurations published</option>';
+      sel.title = 'Add configuration files to the configs folder and list them in configs/index.json.';
+      return;
+    }
+    sel.innerHTML = '<option value="">Choose a saved configuration…</option>' +
+      savedConfigs.map((c) =>
+        '<option value="' + esc(c.file) + '"' +
+        (c.description ? ' title="' + esc(c.description) + '"' : '') + '>' +
+        esc(c.label) + '</option>').join('');
+    sel.disabled = false;
+    sel.title = 'Select a configuration and click Load selected to re-fetch its gages and restore the saved analysis settings.';
+  } catch (e) {
+    sel.innerHTML = '<option value="">Saved configurations unavailable</option>';
+    sel.title = 'Could not load configs/index.json: ' + String(e && e.message ? e.message : e);
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('Saved configurations unavailable:', e);
+    }
+  }
+}
+
+async function loadSavedConfig(file) {
+  const entry = savedConfigs.find((c) => c.file === file);
+  if (!entry) return;
+  const req = ++savedConfigReq;
+  showStatus('Loading saved configuration <strong>' + esc(entry.label) + '</strong>…', 'info');
+  try {
+    const res = await fetch(savedConfigUrl(entry.file), { cache: 'no-cache' });
+    if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'error'));
+    const cfg = await res.json();
+    if (req !== savedConfigReq) return;   // a newer selection won
+    if (!isUsaceConfig(cfg)) {
+      showStatus('Saved configuration <strong>' + esc(entry.label) +
+        '</strong> is not a valid USACE Release Analysis configuration (missing "app" or "rows").', 'error');
+      return;
+    }
+    applyConfig(cfg);
+  } catch (e) {
+    if (req !== savedConfigReq) return;
+    showStatus('Could not load saved configuration <strong>' + esc(entry.label) + '</strong>: ' +
+      esc(e && e.message ? e.message : e) + '.', 'error');
+  }
 }
 
 /* Put the saved form state back into Step 1 and trigger a fresh fetch. */

@@ -867,6 +867,20 @@ function init() {
     if (inp) inp.value = '';
   });
 
+  // Published configurations (configs/index.json)
+  const savedSel = document.getElementById('savedConfigSelect');
+  const savedBtn = document.getElementById('btnLoadSavedConfig');
+  const syncSavedBtn = () => {
+    if (savedBtn) savedBtn.disabled = !(savedSel && savedSel.value);
+  };
+  if (savedSel && savedBtn) {
+    savedSel.addEventListener('change', syncSavedBtn);
+    savedBtn.addEventListener('click', () => {
+      if (savedSel.value) loadSavedConfig(savedSel.value);
+    });
+  }
+  loadSavedConfigIndex().then(syncSavedBtn);
+
   initChart();
   initBarChart();
   setSelectionUi('Load gage data above, then click two points on the chart to define the storm start and end.', 'info');

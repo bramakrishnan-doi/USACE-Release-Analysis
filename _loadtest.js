@@ -50,7 +50,9 @@ const ctxObj = {
   setTimeout: () => 0,
   clearTimeout: () => {},
   console: console,
-  fetch: (u) => Promise.reject(new Error('network disabled in load test')),
+  fetch: (u) => String(u).indexOf('configs/index.json') >= 0
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ configs: [] }) })
+    : Promise.reject(new Error('network disabled in load test')),
   Chart: class ChartStub {
     constructor(el, cfg) {
       this.canvas = el.canvas ? el.canvas : el;   // mirror Chart.js: chart.canvas = the <canvas> element
@@ -176,11 +178,97 @@ if (!eventStart || eventStart.getTime() !== t0 + 10 * H) throw new Error('config
 if (!eventEnd || eventEnd.getTime() !== t0 + 60 * H) throw new Error('config did not restore event end');
 if (document.getElementById('lagHours').value !== 48) throw new Error('config did not restore lag hours');
 console.log('config apply OK: basis, baseline, gap fill, event window, lag restored');
+
+// --- published-config manifest helpers ---
+const sampleIndex = normalizeSavedConfigIndex({
+  configs: [
+    { label: 'Painted Rock', file: 'painted-rock-2023.json', description: 'Gila River' },
+    { label: '', file: 'fallback.json' },
+    { label: 'Traversal', file: '../secret.json' },
+    { label: 'Wrong type', file: 'notes.txt' },
+    { label: 'Duplicate', file: 'painted-rock-2023.json' }
+  ]
+});
+if (sampleIndex.length !== 2) throw new Error('manifest should keep 2 of 5 entries, got ' + sampleIndex.length);
+if (sampleIndex[0].label !== 'Painted Rock' || sampleIndex[0].file !== 'painted-rock-2023.json') {
+  throw new Error('manifest first entry wrong');
+}
+if (sampleIndex[1].label !== 'fallback.json') throw new Error('manifest should fall back to the filename');
+if (savedConfigUrl('painted-rock-2023.json') !== 'configs/painted-rock-2023.json') {
+  throw new Error('savedConfigUrl wrong: ' + savedConfigUrl('painted-rock-2023.json'));
+}
+if (!isUsaceConfig({ app: 'USACE Release Analysis', rows: [{}, {}] })) throw new Error('valid config rejected');
+if (isUsaceConfig({ app: 'USACE Release Analysis', rows: [{}] })) throw new Error('single-row config accepted');
+if (isUsaceConfig({ app: 'Something else', rows: [{}, {}] })) throw new Error('foreign config accepted');
+console.log('saved-config manifest OK: filters invalid entries, builds safe URLs');
 `;
 try {
   vm.runInContext(driver, ctx, { filename: 'loadtest-driver.js' });
-  console.log('LOAD TEST PASS ✔ — all three files execute and wire together');
 } catch (e) {
   console.error('LOAD TEST FAIL ✘ — driver: ' + e.message + '\n' + (e.stack || '').split('\n').slice(0, 4).join('\n'));
   process.exit(1);
 }
+
+(async () => {
+  try {
+    // --- real manifest and files ---
+    const indexPath = path.join(__dirname, 'configs', 'index.json');
+    if (!fs.existsSync(indexPath)) throw new Error('configs/index.json is missing');
+    const realIndex = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    const realEntries = vm.runInContext(
+      'normalizeSavedConfigIndex(' + JSON.stringify(realIndex) + ')', ctx);
+    if (!realEntries.length) throw new Error('configs/index.json contains no usable entries');
+    for (const entry of realEntries) {
+      const p = path.join(__dirname, 'configs', entry.file);
+      if (!fs.existsSync(p)) throw new Error('published config file is missing: ' + entry.file);
+      const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (!cfg || cfg.app !== 'USACE Release Analysis' || !Array.isArray(cfg.rows) || cfg.rows.length < 2) {
+        throw new Error('published config is invalid: ' + entry.file);
+      }
+    }
+    console.log('saved-config files OK: ' + realEntries.length + ' published configuration(s) valid');
+
+    // --- dropdown population and selection through mocked fetch ---
+    ctxObj.fetch = async (url) => {
+      const u = String(url);
+      if (u === 'configs/index.json') {
+        return { ok: true, status: 200, json: async () => ({ configs: realIndex.configs }) };
+      }
+      if (u === 'configs/painted-rock-2023.json') {
+        return {
+          ok: true, status: 200, json: async () => ({
+            app: 'USACE Release Analysis', version: 1,
+            rows: [
+              { label: 'Painted A', id: '09519800' },
+              { label: 'Painted B', id: '09520280' }
+            ],
+            window: { start: '2023-03-01T08:00:00.000Z', end: '2023-03-04T08:00:00.000Z' },
+            volumeBasis: 'direct', lagHours: 24, event: null, baselines: {}, fills: {}
+          })
+        };
+      }
+      throw new Error('unexpected fetch: ' + u);
+    };
+
+    await vm.runInContext('loadSavedConfigIndex()', ctx);
+    const sel = els.savedConfigSelect;
+    if (!sel || sel.disabled) throw new Error('saved-config dropdown did not enable');
+    if (sel.innerHTML.indexOf('Painted Rock Dam 2023') < 0) {
+      throw new Error('published configuration did not appear in the dropdown');
+    }
+    const listed = vm.runInContext('savedConfigs.length', ctx);
+    if (listed !== realEntries.length) throw new Error('dropdown count = ' + listed + ', expected ' + realEntries.length);
+
+    await vm.runInContext('loadSavedConfig("painted-rock-2023.json")', ctx);
+    const rowCount = vm.runInContext('gageRowsArr.length', ctx);
+    if (rowCount !== 2) throw new Error('saved config did not populate the gage rows, got ' + rowCount);
+    const firstLabel = vm.runInContext('gageRowsArr[0].label', ctx);
+    if (firstLabel !== 'Painted A') throw new Error('saved config row label = ' + firstLabel);
+    console.log('saved-config dropdown OK: manifest fetched, option listed, selection applied');
+
+    console.log('LOAD TEST PASS ✔ — all three files execute and wire together');
+  } catch (e) {
+    console.error('LOAD TEST FAIL ✘ — saved configs: ' + e.message + '\n' + (e.stack || '').split('\n').slice(0, 4).join('\n'));
+    process.exit(1);
+  }
+})();
