@@ -11,6 +11,12 @@
       "file": "painted-rock-2010.json",
       "description": "Gila River below Painted Rock Dam → Dateland → Dome, January–May 2010. Three gages, flat baselines, linear gap fills.",
       "savedAt": "2026-11-10T18:27:10.354Z"
+    },
+    {
+      "label": "Painted Rock Dam 2005 — Gila River",
+      "file": "painted-rock-2005.json",
+      "description": "Gila River below Painted Rock Dam → Dateland → Dome, January–August 2005. Three gages, flat baselines, linear gap fills.",
+      "savedAt": "2026-11-10T18:51:10.354Z"
     }
   ]
 }

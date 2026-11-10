@@ -1,0 +1,103 @@
+{
+  "app": "USACE Release Analysis",
+  "version": 1,
+  "savedAt": "2026-11-10T18:48:59.738Z",
+  "rows": [
+    {
+      "label": "Gila River Below Painted Rock Dam, AZ",
+      "id": "USGS-09519800"
+    },
+    {
+      "label": "Gila River Near Dateland, AZ",
+      "id": "USGS-09520280"
+    },
+    {
+      "label": "Gila River Near Dome, AZ",
+      "id": "USGS-09520500"
+    }
+  ],
+  "window": {
+    "start": "2005-01-01T08:00:00.000Z",
+    "end": "2005-09-01T07:00:00.000Z"
+  },
+  "volumeBasis": "direct",
+  "lagHours": 24,
+  "event": {
+    "start": "2005-01-02T03:17:04.882Z",
+    "end": "2005-08-31T09:41:39.562Z"
+  },
+  "baselines": {
+    "USGS-09519800": {
+      "method": "flat",
+      "flatHours": 24,
+      "diurnalDays": 2,
+      "linearHours": 2,
+      "manualCfs": 0
+    },
+    "USGS-09520280": {
+      "method": "flat",
+      "flatHours": 24,
+      "diurnalDays": 2,
+      "linearHours": 2,
+      "manualCfs": 0
+    },
+    "USGS-09520500": {
+      "method": "flat",
+      "flatHours": 24,
+      "diurnalDays": 2,
+      "linearHours": 2,
+      "manualCfs": 0
+    }
+  },
+  "fills": {
+    "USGS-09519800": [
+      {
+        "t0": 1107888300000,
+        "t1": 1107890100000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1117687500000,
+        "t1": 1117689300000,
+        "fill": "linear"
+      }
+    ],
+    "USGS-09520280": [
+      {
+        "t0": 1107848700000,
+        "t1": 1107854100000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1107935100000,
+        "t1": 1107938700000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1108017900000,
+        "t1": 1108450800000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1108453500000,
+        "t1": 1108465200000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1117698300000,
+        "t1": 1117705500000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1117784700000,
+        "t1": 1117791000000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1117957500000,
+        "t1": 1117963800000,
+        "fill": "linear"
+      }
+    ]
+  }
+}
