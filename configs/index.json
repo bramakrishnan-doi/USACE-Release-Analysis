@@ -17,6 +17,24 @@
       "file": "painted-rock-2005.json",
       "description": "Gila River below Painted Rock Dam → Dateland → Dome, January–August 2005. Three gages, flat baselines, linear gap fills.",
       "savedAt": "2026-11-10T18:51:10.354Z"
+    },
+    {
+      "label": "Alamo Dam 2023 - Bill Williams River",
+      "file": "alamo-2023.json",
+      "description": "Bill Williams River Below Alamo Dam → Bill Williams River Near Parker, March–April 2023. Three gages, flat baselines, linear gap fills.",
+      "savedAt": "2026-11-10T18:51:10.354Z"
+    },
+    {
+      "label": "Alamo Dam 2020 - Bill Williams River",
+      "file": "alamo-2020.json",
+      "description": "Bill Williams River Below Alamo Dam → Bill Williams River Near Parker, March–May 2020. Three gages, flat baselines, linear gap fills.",
+      "savedAt": "2026-11-10T18:51:10.354Z"
+    },
+    {
+      "label": "Alamo Dam 2018 - Bill Williams River",
+      "file": "alamo-2018.json",
+      "description": "Bill Williams River Below Alamo Dam → Bill Williams River Near Parker, March–April 2018. Three gages, flat baselines, linear gap fills.",
+      "savedAt": "2026-11-10T18:51:10.354Z"
     }
   ]
 }

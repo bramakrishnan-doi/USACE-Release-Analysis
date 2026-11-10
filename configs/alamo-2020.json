@@ -1,0 +1,102 @@
+{
+  "app": "USACE Release Analysis",
+  "version": 1,
+  "savedAt": "2026-11-10T19:08:32.971Z",
+  "rows": [
+    {
+      "label": "Bill Williams River Below Alamo Dam, AZ",
+      "id": "USGS-09426000"
+    },
+    {
+      "label": "Bill Williams River Near Parker, AZ",
+      "id": "USGS-09426620"
+    }
+  ],
+  "window": {
+    "start": "2020-03-01T08:00:00.000Z",
+    "end": "2020-06-01T07:00:00.000Z"
+  },
+  "volumeBasis": "direct",
+  "lagHours": 24,
+  "event": {
+    "start": "2020-03-12T11:08:29.788Z",
+    "end": "2020-05-17T00:31:57.092Z"
+  },
+  "baselines": {
+    "USGS-09426000": {
+      "method": "flat",
+      "flatHours": 24,
+      "diurnalDays": 2,
+      "linearHours": 2,
+      "manualCfs": 0
+    },
+    "USGS-09426620": {
+      "method": "flat",
+      "flatHours": 24,
+      "diurnalDays": 2,
+      "linearHours": 2,
+      "manualCfs": 0
+    }
+  },
+  "fills": {
+    "USGS-09426000": [
+      {
+        "t0": 1583336700000,
+        "t1": 1583339400000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1587475800000,
+        "t1": 1587477600000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1587564000000,
+        "t1": 1587567600000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1587718800000,
+        "t1": 1587720600000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1589304600000,
+        "t1": 1589307300000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1589311800000,
+        "t1": 1589313600000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1589384700000,
+        "t1": 1589386500000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1590599700000,
+        "t1": 1590601500000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1590677100000,
+        "t1": 1590680700000,
+        "fill": "linear"
+      }
+    ],
+    "USGS-09426620": [
+      {
+        "t0": 1589994000000,
+        "t1": 1589996700000,
+        "fill": "linear"
+      },
+      {
+        "t0": 1589999400000,
+        "t1": 1590003000000,
+        "fill": "linear"
+      }
+    ]
+  }
+}
