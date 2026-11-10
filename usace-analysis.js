@@ -927,7 +927,7 @@ function loadConfigFile(file) {
 
 /* ---------- Published configurations (configs/index.json) ----------
    Static configs shipped with the site.  Users pick one from the
-   dropdown in Step 1; the JSON is fetched from the same origin and
+   card above Step 1; the JSON is fetched from the same origin and
    fed through the normal Load Config pipeline. */
 
 function normalizeSavedConfigIndex(data) {
@@ -961,9 +961,12 @@ function savedConfigUrl(file) {
 async function loadSavedConfigIndex() {
   const sel = document.getElementById('savedConfigSelect');
   if (!sel) return;
+  const desc = document.getElementById('savedConfigDesc');
+  const setDesc = (txt) => { if (desc) desc.textContent = txt; };
   if (typeof fetch !== 'function') {
     sel.innerHTML = '<option value="">Saved configurations unavailable</option>';
     sel.title = 'Serve the app over HTTP to load published configurations.';
+    setDesc('Published configurations need the app served over HTTP. Set up manually below.');
     return;
   }
   savedConfigs = [];
@@ -976,6 +979,7 @@ async function loadSavedConfigIndex() {
     if (!savedConfigs.length) {
       sel.innerHTML = '<option value="">No saved configurations published</option>';
       sel.title = 'Add configuration files to the configs folder and list them in configs/index.json.';
+      setDesc('No published configurations are available right now. Set up manually below.');
       return;
     }
     sel.innerHTML = '<option value="">Choose a saved configuration…</option>' +
@@ -984,10 +988,11 @@ async function loadSavedConfigIndex() {
         (c.description ? ' title="' + esc(c.description) + '"' : '') + '>' +
         esc(c.label) + '</option>').join('');
     sel.disabled = false;
-    sel.title = 'Select a configuration and click Load selected to re-fetch its gages and restore the saved analysis settings.';
+    sel.title = 'Select a configuration and click Load configuration to re-fetch its gages and restore the saved analysis settings.';
   } catch (e) {
     sel.innerHTML = '<option value="">Saved configurations unavailable</option>';
     sel.title = 'Could not load configs/index.json: ' + String(e && e.message ? e.message : e);
+    setDesc('Published configurations could not be loaded. Set up manually below.');
     if (typeof console !== 'undefined' && console.warn) {
       console.warn('Saved configurations unavailable:', e);
     }

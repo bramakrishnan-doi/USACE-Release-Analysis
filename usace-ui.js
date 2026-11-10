@@ -870,16 +870,42 @@ function init() {
   // Published configurations (configs/index.json)
   const savedSel = document.getElementById('savedConfigSelect');
   const savedBtn = document.getElementById('btnLoadSavedConfig');
+  const savedDesc = document.getElementById('savedConfigDesc');
   const syncSavedBtn = () => {
-    if (savedBtn) savedBtn.disabled = !(savedSel && savedSel.value);
+    const file = savedSel ? savedSel.value : '';
+    const entry = file ? savedConfigs.find((c) => c.file === file) : null;
+    if (savedBtn) savedBtn.disabled = !file;
+    if (savedDesc) {
+      if (entry) {
+        savedDesc.textContent = entry.description || 'No description provided for this configuration.';
+      } else if (savedConfigs.length) {
+        savedDesc.textContent = 'Choose a configuration to see what it contains.';
+      }
+    }
+  };
+  const goToSetup = () => {
+    const card = document.getElementById('cardGageSetup');
+    if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
   if (savedSel && savedBtn) {
     savedSel.addEventListener('change', syncSavedBtn);
     savedBtn.addEventListener('click', () => {
-      if (savedSel.value) loadSavedConfig(savedSel.value);
+      if (!savedSel.value) return;
+      goToSetup();
+      loadSavedConfig(savedSel.value);
     });
   }
-  loadSavedConfigIndex().then(syncSavedBtn);
+  const manualBtn = document.getElementById('btnManualSetup');
+  if (manualBtn) {
+    manualBtn.addEventListener('click', () => {
+      goToSetup();
+      setTimeout(() => {
+        const firstId = document.querySelector('#gageRows .g-id');
+        if (firstId && firstId.focus) firstId.focus();
+      }, 350);
+    });
+  }
+  loadSavedConfigIndex().then(syncSavedBtn).catch(() => { /* the dropdown reports its own errors */ });
 
   initChart();
   initBarChart();
