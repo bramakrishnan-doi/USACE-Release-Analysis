@@ -41,7 +41,10 @@ const ctxObj = {
   document: {
     getElementById: (id) => (els[id] = els[id] || makeEl(id)),
     querySelectorAll() { return []; },
-    querySelector() { return null; },
+    querySelector(sel) {
+      if (sel === '.forecast-chart-wrap') return (els['forecast-wrap'] = els['forecast-wrap'] || makeEl('forecast-wrap'));
+      return null;
+    },
     createElement: (tag) => makeEl('tag-' + tag),
     body: makeEl('body'),
     addEventListener() {}
@@ -143,12 +146,43 @@ if (travel.riseDelayMs == null) throw new Error('travel row missing riseDelayMs'
 exportCSV ? 0 : 0;   // symbol existence probe only
 console.log('in-load pipeline OK: directAF B = ' + b.results.directAF.toFixed(1) + ' AF, travel rows = ' + travelRows.length + ', gaps listed = ' + b.gaps.length);
 
+// --- downstream arrival forecast ---
+if (!CalibrationModel.calibrated) throw new Error('forecast did not calibrate: ' + CalibrationModel.calibrationSource);
+if (typeof generateArrivalForecast !== 'function' || generateArrivalForecast.constructor.name !== 'AsyncFunction') {
+  throw new Error('generateArrivalForecast should be an async function');
+}
+if (!lastForecast || !lastForecast.hourly || lastForecast.hourly.length < 2) throw new Error('forecast hourly series not built');
+if (!lastForecast.daily || !lastForecast.daily.length) throw new Error('forecast daily accounting not built');
+const fs = lastForecast.summary;
+if (!(fs.totalArrivedAF > 0)) throw new Error('forecast arrival volume should be positive');
+if (!(fs.peakArrivingCfs > 0) || fs.peakArrivalMs == null) throw new Error('forecast peak arrival missing');
+const targetVol = fs.conveyanceEfficiency * Math.max(0, fs.totalReleaseAF - fs.initialAbstractionAF) *
+  fs.seasonalityETFactor * fs.antecedentMoistureFactor;
+if (Math.abs(fs.totalArrivedAF - targetVol) > 0.5) {
+  throw new Error('forecast volume normalization off: ' + fs.totalArrivedAF.toFixed(2) + ' vs ' + targetVol.toFixed(2) + ' AF');
+}
+const lastRow = lastForecast.hourly[lastForecast.hourly.length - 1];
+if (Math.abs(lastRow.cumArrivingAF - fs.totalArrivedAF) > 0.01) throw new Error('cumulative arrival does not close');
+if (Math.abs(lastRow.cumReleaseAF - fs.totalReleaseAF) > 0.01) throw new Error('cumulative release does not close');
+const dailyArr = lastForecast.daily.reduce((s, d) => s + d.arrivingAF, 0);
+if (Math.abs(dailyArr - fs.totalArrivedAF) > 0.5) throw new Error('daily arrival does not sum to the forecast total');
+const csv = buildCsvText();
+const fcHeader = 'timestamp_utc,date_local,Release_Flow_cfs,Forecast_Dome_Flow_cfs,Release_Cumulative_AF,Cumulative_Dome_AF';
+if (csv.indexOf(fcHeader) < 0) throw new Error('CSV is missing the forecast hourly header block');
+if (csv.indexOf('# FORECAST DAILY ACCOUNTING') < 0) throw new Error('CSV is missing the forecast daily block');
+if (!forecastChart || forecastChart.data.datasets.length !== 4) {
+  throw new Error('forecast chart should carry release, arrival and both cumulative series');
+}
+console.log('forecast OK: ' + fs.totalArrivedAF.toFixed(1) + ' AF arrives (' + fs.netRecoveryPct.toFixed(1) + '%), peak ' +
+  fs.peakArrivingCfs.toFixed(1) + ' cfs, ' + lastForecast.daily.length + ' daily rows, CSV headers + dual-axis chart verified');
+
 // --- HTML report build (excludes baseline/gap-fill cards; peak-to-peak primary) ---
 const report = buildReportHtml();
 if (!report || report.length < 2000) throw new Error('report html not built (len ' + (report ? report.length : 0) + ')');
 const mustHave = [
   'Volume comparison', 'Peak-to-peak delay', 'First-rise delay', 'Operational lead time',
-  'Hydrograph overlay', 'data:image/png', 'Travel time between gages', 'Gages analyzed', 'peak-to-peak basis'
+  'Hydrograph overlay', 'data:image/png', 'Travel time between gages', 'Gages analyzed', 'peak-to-peak basis',
+  'Downstream arrival forecast', 'Daily volumetric accounting', 'Routing notes'
 ];
 for (const s of mustHave) {
   if (report.indexOf(s) < 0) throw new Error('report missing section: ' + s);
@@ -166,7 +200,15 @@ pendingConfig = {
   lagHours: 48,
   event: { start: new Date(t0 + 10 * H).toISOString(), end: new Date(t0 + 60 * H).toISOString() },
   baselines: { 'USGS-09419800': { method: 'manual', flatHours: 12, diurnalDays: 2, linearHours: 3, manualCfs: 35 } },
-  fills: { 'USGS-09520500': [{ t0: b.gaps[0].t0, t1: b.gaps[0].t1, fill: 'hold' }] }
+  fills: { 'USGS-09520500': [{ t0: b.gaps[0].t0, t1: b.gaps[0].t1, fill: 'hold' }] },
+  forecast: {
+    sourceId: 'USGS-09419800', targetId: 'USGS-09520500',
+    tuning: {
+      initialAbstractionAF: 9000, conveyanceEfficiency: 0.30,
+      seasonalityETFactor: 1.15, antecedentMoistureFactor: 1.05, releaseScale: 1.25
+    },
+    tuningDirty: true
+  }
 };
 applyPendingConfig();
 if (volumeBasis !== 'total') throw new Error('config did not restore volume basis');
@@ -175,7 +217,17 @@ if (b.gaps[0].fill !== 'hold') throw new Error('config did not restore gap fill,
 if (!eventStart || eventStart.getTime() !== t0 + 10 * H) throw new Error('config did not restore event start');
 if (!eventEnd || eventEnd.getTime() !== t0 + 60 * H) throw new Error('config did not restore event end');
 if (document.getElementById('lagHours').value !== 48) throw new Error('config did not restore lag hours');
-console.log('config apply OK: basis, baseline, gap fill, event window, lag restored');
+if (forecastSourceId !== 'USGS-09419800' || forecastTargetId !== 'USGS-09520500') {
+  throw new Error('config did not restore the forecast source/target pair');
+}
+if (CalibrationModel.tuning.initialAbstractionAF !== 9000 ||
+    Math.abs(CalibrationModel.tuning.conveyanceEfficiency - 0.30) > 1e-9 ||
+    Math.abs(CalibrationModel.tuning.seasonalityETFactor - 1.15) > 1e-9 ||
+    Math.abs(CalibrationModel.tuning.antecedentMoistureFactor - 1.05) > 1e-9 ||
+    Math.abs(CalibrationModel.tuning.releaseScale - 1.25) > 1e-9) {
+  throw new Error('config did not restore forecast tuning');
+}
+console.log('config apply OK: basis, baseline, gap fill, event window, lag, forecast tuning restored');
 `;
 try {
   vm.runInContext(driver, ctx, { filename: 'loadtest-driver.js' });

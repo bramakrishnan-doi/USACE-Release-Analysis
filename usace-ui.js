@@ -389,6 +389,7 @@ function renderAllDynamic() {
   renderWarnings();
   renderLegend(gages.filter((g) => g.ok));
   renderResults();
+  renderForecast();
   updateBarChart();
   syncButtonStates();
 }
@@ -405,7 +406,7 @@ function syncButtonStates() {
   document.getElementById('btnExportCSV').disabled = !(anyOk && eventStart && eventEnd);
 }
 
-/* ---------- Step 4 card (baselines) ---------- */
+/* ---------- Step 5 card (baselines) ---------- */
 function renderBaselinesCard() {
   const box = document.getElementById('baselinesContainer');
   const anyOk = gages.some((g) => g.ok);
@@ -456,7 +457,7 @@ function renderBaselinesCard() {
   box.innerHTML = html;
 }
 
-/* ---------- Step 5 card (gaps) ---------- */
+/* ---------- Step 6 card (gaps) ---------- */
 function renderGapsCard() {
   const box = document.getElementById('gapsContainer');
   const anyOk = gages.some((g) => g.ok);
@@ -698,7 +699,7 @@ function renderWarnings() {
     for (const g of gages) {
       if (!g.ok) continue;
       const gs = gapSummary(g, evS, evE);
-      if (gs.tag === 'unfilled') items.push('<strong>' + esc(g.label || g.id) + '</strong>: ' + esc(gs.text) + ' — choose a fill action in Step 5 or accept the reduced accuracy.');
+      if (gs.tag === 'unfilled') items.push('<strong>' + esc(g.label || g.id) + '</strong>: ' + esc(gs.text) + ' — choose a fill action in Step 6 or accept the reduced accuracy.');
     }
   }
   if (!eventStart || !eventEnd) items.push('No event window selected yet — volumes and travel times are pending (Step 2).');
@@ -711,6 +712,431 @@ function renderWarnings() {
     html = '<ul class="warn-list">' + items.map((w) => '<li>' + w + '</li>').join('') + '<li class="ok">Volume integration excludes (does not guess) any portion of the event window left unfilled — flagged rows above affect downstream comparisons.</li></ul>';
   }
   box.innerHTML = html;
+}
+
+/* ---------- Step 4: downstream arrival forecast ---------- */
+function initForecastChart() {
+  if (forecastChart) return;
+  const canvas = document.getElementById('forecastCanvas');
+  if (!canvas) return;
+  forecastChart = new Chart(canvas, {
+    type: 'line',
+    data: { datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 200 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'top',
+          labels: { boxWidth: 12, font: { size: 11 }, usePointStyle: true, pointStyle: 'line' }
+        },
+        tooltip: {
+          backgroundColor: 'rgba(15, 23, 42, 0.92)',
+          titleFont: { size: 12, weight: 'bold' },
+          bodyFont: { size: 12 },
+          padding: 10,
+          callbacks: {
+            title: (items) => items.length ? moment(items[0].parsed.x).format('YYYY-MM-DD HH:mm') + ' (local)' : '',
+            label: (c) => {
+              const ds = c.dataset || {};
+              const v = c.parsed.y;
+              if (!Number.isFinite(v)) return null;
+              return (ds.fcLabel || ds.label) + ': ' + fmtNum(v, 1) + ' ' + (ds.fcUnits || 'cfs');
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: {
+            displayFormats: { hour: 'MMM D, HH:mm', day: 'MMM D', week: 'MMM D', month: 'MMM YYYY' },
+            tooltipFormat: 'YYYY-MM-DD HH:mm'
+          },
+          grid: { color: '#f1f5f9' },
+          ticks: { color: '#64748b', font: { size: 11 }, maxRotation: 0, autoSkip: true }
+        },
+        y: {
+          position: 'left',
+          title: { display: true, text: 'Flow (cfs)', color: '#475569', font: { size: 12, weight: 'bold' } },
+          grid: { color: '#f1f5f9' },
+          ticks: { color: '#64748b', font: { size: 11 } },
+          beginAtZero: true
+        },
+        y1: {
+          position: 'right',
+          title: { display: true, text: 'Cumulative volume (AF)', color: '#475569', font: { size: 12, weight: 'bold' } },
+          grid: { drawOnChartArea: false },
+          ticks: { color: '#64748b', font: { size: 11 } },
+          beginAtZero: true
+        }
+      }
+    }
+  });
+}
+
+function refreshForecastGageOptions() {
+  const srcSel = document.getElementById('fcSourceSelect');
+  const tgtSel = document.getElementById('fcTargetSelect');
+  if (!srcSel || !tgtSel) return;
+
+  const usable = gages.filter((g) => g.ok && g.results);
+  let src = usable.find((g) => g.id === forecastSourceId);
+  if (!src && CalibrationModel.sourceId) src = usable.find((g) => g.id === CalibrationModel.sourceId);
+  // The last gage cannot be a source — it has no downstream target.
+  if (!src || usable.indexOf(src) === usable.length - 1) src = usable[0];
+  if (!src) { srcSel.innerHTML = ''; tgtSel.innerHTML = ''; return; }
+  forecastSourceId = src.id;
+  const srcIdx = usable.indexOf(src);
+  const srcOptions = usable.slice(0, Math.max(1, usable.length - 1));
+  srcSel.innerHTML = srcOptions.map((g) =>
+    '<option value="' + esc(g.id) + '"' + (g.id === src.id ? ' selected' : '') + '>' +
+    esc(g.label || g.id) + ' — ' + esc(g.id) + '</option>'
+  ).join('');
+
+  const downstream = usable.slice(srcIdx + 1);
+  let tgt = downstream.find((g) => g.id === forecastTargetId);
+  if (!tgt) tgt = downstream.find((g) => g.id === CalibrationModel.targetId);
+  if (!tgt) tgt = downstream[downstream.length - 1];
+  if (!tgt) { tgtSel.innerHTML = ''; return; }
+  forecastTargetId = tgt.id;
+  tgtSel.innerHTML = downstream.map((g) =>
+    '<option value="' + esc(g.id) + '"' + (g.id === tgt.id ? ' selected' : '') + '>' +
+    esc(g.label || g.id) + ' — ' + esc(g.id) + '</option>'
+  ).join('');
+}
+
+function renderForecastCalib() {
+  const box = document.getElementById('forecastCalib');
+  if (!box) return;
+  const m = CalibrationModel;
+  if (!m.calibrated) {
+    box.innerHTML = '<span class="calib-pill tuned">Calibration unavailable — ' +
+      esc(m.calibrationSource || 'select another source/target pair or event window') + '</span>';
+    return;
+  }
+  const pills = [
+    ['Calibrated event', m.eventLabel || '—'],
+    ['I<sub>a</sub>', fmtNum(m.initialAbstractionAF, 0) + ' AF'],
+    ['C<sub>eff</sub>', fmtNum(m.conveyanceEfficiency * 100, 1) + '%'],
+    ['Front lag', fmtNum(m.frontLagHours, 1) + ' h'],
+    ['Crest lag', fmtNum(m.crestLagHours, 1) + ' h'],
+    ['Peak α', fmtNum(m.peakAttenuationRatio, 2)],
+    ['Recession k', fmtNum(m.dispersionK, 3) + '/h'],
+    ['Event recovery', fmtNum(m.netRecoveryPct, 1) + '%']
+  ];
+  let html = pills.map((p) =>
+    '<span class="calib-pill">' + p[0] + ' <strong>' + esc(p[1]) + '</strong></span>'
+  ).join('');
+  if (m.tuningDirty) {
+    html += '<span class="calib-pill tuned">Scenario tuned — forecast differs from calibration</span>';
+  }
+  box.innerHTML = html;
+}
+
+function syncForecastControls() {
+  const m = CalibrationModel;
+  const t = m.tuning;
+
+  const iaEl = document.getElementById('fcInitialAbstraction');
+  if (iaEl) {
+    iaEl.min = String(Math.min(6000, Math.floor(t.initialAbstractionAF / 500) * 500));
+    iaEl.max = String(Math.max(16000, Math.ceil(t.initialAbstractionAF / 500) * 500));
+    iaEl.value = String(t.initialAbstractionAF);
+  }
+  const iaPct = t.conveyanceEfficiency * 100;
+  const ceEl = document.getElementById('fcConveyance');
+  if (ceEl) {
+    ceEl.min = String(Math.min(15, Math.floor(iaPct)));
+    ceEl.max = String(Math.max(45, Math.ceil(iaPct)));
+    ceEl.value = String(iaPct);
+  }
+  const seaEl = document.getElementById('fcSeason');
+  if (seaEl) {
+    const sea = String(t.seasonalityETFactor);
+    const seaNum = Number(t.seasonalityETFactor);
+    const opts = seaEl.options ? Array.from(seaEl.options) : [];
+    const match = opts.find((o) => Math.abs(Number(o.value) - seaNum) < 1e-9);
+    if (opts.length && !match) {
+      const opt = document.createElement('option');
+      opt.value = sea;
+      opt.textContent = sea + ' — consensus calibration';
+      seaEl.appendChild(opt);
+    }
+    seaEl.value = match ? match.value : sea;
+  }
+  const antEl = document.getElementById('fcAntecedent');
+  if (antEl) {
+    antEl.min = String(Math.min(0.80, Math.floor(t.antecedentMoistureFactor * 100) / 100));
+    antEl.max = String(Math.max(1.20, Math.ceil(t.antecedentMoistureFactor * 100) / 100));
+    antEl.value = String(t.antecedentMoistureFactor);
+  }
+  const scalePct = t.releaseScale * 100;
+  const scEl = document.getElementById('fcReleaseScale');
+  if (scEl) {
+    scEl.min = String(Math.min(50, Math.floor(scalePct / 5) * 5));
+    scEl.max = String(Math.max(200, Math.ceil(scalePct / 5) * 5));
+    scEl.value = String(scalePct);
+  }
+
+  const setText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  setText('fcIaVal', fmtNum(t.initialAbstractionAF, 0) + ' AF');
+  setText('fcEffVal', fmtNum(iaPct, 1) + '%');
+  setText('fcSeasonVal', fmtNum(t.seasonalityETFactor, 2) + '×');
+  setText('fcAnteVal', fmtNum(t.antecedentMoistureFactor, 2) + '×');
+  setText('fcScaleVal', fmtNum(scalePct, 0) + '%');
+  setText('fcIaCalib', fmtNum(m.initialAbstractionAF, 0) + ' AF');
+  setText('fcEffCalib', fmtNum(m.conveyanceEfficiency * 100, 1) + '%');
+}
+
+function renderForecastKpis(fc, errMsg) {
+  const grid = document.getElementById('forecastKpis');
+  if (!grid) return;
+  if (!fc || !fc.summary) {
+    grid.innerHTML = '<div class="kpi"><div class="kpi-label">Forecast</div>' +
+      '<div class="kpi-value">No arrival</div>' +
+      '<div class="kpi-sub">' + esc(errMsg ||
+        'The proposed release does not exceed the calibrated initial abstraction, or the source schedule is empty.') + '</div></div>';
+    return;
+  }
+  const s = fc.summary;
+  let html = '';
+  html += kpi('Projected volume at ' + s.targetLabel, fmtNum(s.totalArrivedAF, 0) + ' AF',
+    fmtNum(s.billionGallons, 2) + ' billion gallons · ' + fmtNum(s.netRecoveryPct, 1) + '% of release');
+  html += kpi('Net recovery rate', fmtNum(s.netRecoveryPct, 1) + '%',
+    fmtNum(s.totalReleaseAF, 0) + ' AF released · ' + fmtNum(s.transmissionLossAF, 0) + ' AF lost');
+  html += kpi('Forecast peak at ' + s.targetLabel, fmtNum(s.peakArrivingCfs, 0) + ' cfs',
+    fmtDT(s.peakArrivalMs) + ' local' + (s.peakAttenuationRatio ? ' · ' + fmtNum(s.peakAttenuationRatio * 100, 0) + '% of source peak' : ''));
+  html += kpi('First water arrival', fmtDT(s.frontArrivalMs),
+    s.frontLagHours != null ? fmtNum(s.frontLagHours, 0) + ' h after release start' : 'no positive arrival projected');
+  html += kpi('Crest arrival', fmtDT(s.peakArrivalMs),
+    s.crestLagHours != null ? fmtNum(s.crestLagHours, 0) + ' h after source peak' : '—');
+  html += kpi('First water / crest lag', s.frontLagHours != null ? fmtNum(s.frontLagHours, 0) + ' h / ' + fmtNum(s.modelCrestLagHours, 0) + ' h' : '—',
+    'calibrated front and crest routing');
+  grid.innerHTML = html;
+}
+
+function updateForecastChart(fc) {
+  const wrap = document.querySelector('.forecast-chart-wrap');
+  if (!wrap) return;
+  if (!fc || !fc.hourly || fc.hourly.length < 2) {
+    if (forecastChart) {
+      forecastChart.data.labels = [];
+      forecastChart.data.datasets = [];
+      forecastChart.update();
+    }
+    return;
+  }
+  initForecastChart();
+  if (!forecastChart) return;
+
+  const flow = (key) => fc.hourly.map((r) => ({ x: r.timestamp, y: r[key] }));
+  forecastChart.data.datasets = [
+    {
+      label: 'Release to river', fcLabel: 'Release', fcUnits: 'cfs',
+      data: flow('releaseFlow'),
+      borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.10)',
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
+      tension: 0.15, fill: false, yAxisID: 'y', order: 2
+    },
+    {
+      label: 'Projected arrival', fcLabel: 'Arrival', fcUnits: 'cfs',
+      data: flow('arrivingFlow'),
+      borderColor: '#16a34a', backgroundColor: 'rgba(22,163,74,0.12)',
+      borderWidth: 2.4, pointRadius: 0, pointHoverRadius: 4,
+      tension: 0.15, fill: false, yAxisID: 'y', order: 1
+    },
+    {
+      label: 'Cumulative release', fcLabel: 'Cumulative release', fcUnits: 'AF',
+      data: flow('cumReleaseAF'),
+      borderColor: 'rgba(100,116,139,0.75)', borderDash: [6, 4],
+      borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 3,
+      tension: 0.15, fill: false, yAxisID: 'y1', order: 3
+    },
+    {
+      label: 'Cumulative arrival', fcLabel: 'Cumulative arrival', fcUnits: 'AF',
+      data: flow('cumArrivingAF'),
+      borderColor: 'rgba(22,163,74,0.8)', borderDash: [6, 4],
+      borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 3,
+      tension: 0.15, fill: false, yAxisID: 'y1', order: 4
+    }
+  ];
+  forecastChart.update();
+}
+
+function renderForecastDaily(fc) {
+  const body = document.getElementById('forecastDailyBody');
+  const head = document.getElementById('fcArrivalHead');
+  if (!body) return;
+  if (head) {
+    head.textContent = fc && fc.summary
+      ? '— ' + fc.summary.targetLabel + ' · ' + fmtNum(fc.summary.totalArrivedAF, 0) + ' AF total arrival'
+      : '';
+  }
+  if (!fc || !fc.daily || !fc.daily.length) {
+    body.innerHTML = '<tr><td colspan="6" class="subtle">No daily accounting available for this scenario.</td></tr>';
+    return;
+  }
+  let html = '';
+  for (const d of fc.daily) {
+    const lossCls = d.transmissionLossAF > 0 ? 'forecast-loss' : (d.transmissionLossAF < 0 ? 'forecast-gain' : '');
+    html += '<tr>' +
+      '<td>' + esc(d.date) + '</td>' +
+      '<td class="num">' + fmtNum(d.releaseAF, 1) + '</td>' +
+      '<td class="num">' + fmtNum(d.arrivingAF, 1) + '</td>' +
+      '<td class="num ' + lossCls + '">' + fmtNum(d.transmissionLossAF, 1) + '</td>' +
+      '<td class="num">' + fmtNum(d.cumulativeLossAF, 1) + '</td>' +
+      '<td class="num">' + (d.recoveryPct == null ? '—' : fmtNum(d.recoveryPct, 1) + '%') + '</td>' +
+      '</tr>';
+  }
+  const s = fc.summary;
+  const lossCls = s.transmissionLossAF > 0 ? 'forecast-loss' : '';
+  html += '<tr style="font-weight:700;background:#f8fafc;">' +
+    '<td>Total</td>' +
+    '<td class="num">' + fmtNum(s.totalReleaseAF, 1) + '</td>' +
+    '<td class="num">' + fmtNum(s.totalArrivedAF, 1) + '</td>' +
+    '<td class="num ' + lossCls + '">' + fmtNum(s.transmissionLossAF, 1) + '</td>' +
+    '<td class="num">' + fmtNum(s.transmissionLossAF, 1) + '</td>' +
+    '<td class="num">' + fmtNum(s.netRecoveryPct, 1) + '%</td>' +
+    '</tr>';
+  body.innerHTML = html;
+}
+
+function renderForecastNotes(fc) {
+  const box = document.getElementById('forecastNotes');
+  if (!box) return;
+  const m = CalibrationModel;
+  const items = [];
+  if (fc && fc.notes) items.push.apply(items, fc.notes);
+  else if (m.notes) items.push.apply(items, m.notes);
+  if (!items.length) {
+    items.push('No calibration caveats — source and target records produced a complete lag, attenuation and recession fit.');
+  }
+  if (fc && fc.summary) {
+    items.push('Routing: source first rise → downstream first rise = ' + fmtNum(fc.summary.modelFrontLagHours, 1) +
+      ' h; source peak → downstream crest = ' + fmtNum(fc.summary.modelCrestLagHours, 1) +
+      ' h; peak attenuation α = ' + fmtNum(fc.summary.modelPeakAttenuation, 2) +
+      '; recession decay k = ' + fmtNum(fc.summary.modelDispersionK, 3) + ' h⁻¹.');
+    items.push('The hourly arrival series is numerically normalized so its integral equals Ceff × (Vrelease − Ia) × Φseasonality × Φantecedent. Daily volumes bucket that same hourly series by local calendar day.');
+  }
+  box.innerHTML = '<ul class="warn-list">' + items.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>';
+}
+
+function setForecastInputsDisabled(disabled) {
+  ['fcInitialAbstraction', 'fcConveyance', 'fcSeason', 'fcAntecedent', 'fcReleaseScale'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!disabled;
+  });
+  const resetBtn = document.getElementById('btnForecastReset');
+  if (resetBtn) resetBtn.disabled = !!disabled;
+}
+
+function renderForecast() {
+  const emptyEl = document.getElementById('forecastEmpty');
+  const contentEl = document.getElementById('forecastContent');
+  if (!emptyEl || !contentEl) return;
+  const m = CalibrationModel;
+  const usable = gages.filter((g) => g.ok && g.results);
+
+  if (!eventStart || !eventEnd || usable.length < 2) {
+    lastForecast = null;
+    emptyEl.style.display = 'block';
+    contentEl.style.display = 'none';
+    setForecastInputsDisabled(true);
+    emptyEl.textContent = !eventStart || !eventEnd
+      ? 'Select the storm release window (Step 2) to calibrate the downstream arrival forecast.'
+      : 'Load at least two gages with data in the event window (Steps 1–2) to calibrate the arrival forecast.';
+    if (forecastChart) {
+      forecastChart.data.datasets = [];
+      forecastChart.update();
+    }
+    return;
+  }
+
+  // Keep the source/target pickers available even when a pair fails to
+  // calibrate, so the user can choose another reach without reloading.
+  emptyEl.style.display = 'none';
+  contentEl.style.display = 'block';
+  refreshForecastGageOptions();
+  renderForecastCalib();
+  syncForecastControls();
+
+  if (!m.calibrated) {
+    lastForecast = null;
+    setForecastInputsDisabled(true);
+    renderForecastKpis(null, m.calibrationSource || 'Calibration unavailable — choose another source/target pair.');
+    updateForecastChart(null);
+    renderForecastDaily(null);
+    renderForecastNotes(null);
+    return;
+  }
+
+  setForecastInputsDisabled(false);
+  const fc = computeArrivalForecast(buildForecastSchedule(), m.tuning);
+  lastForecast = fc;
+  renderForecastKpis(fc);
+  updateForecastChart(fc);
+  renderForecastDaily(fc);
+  renderForecastNotes(fc);
+}
+
+/* Wire the forecast scenario controls.  Only the forecast changes —
+   the observed-event analysis is left untouched. */
+function wireForecastControls() {
+  const markTuned = () => {
+    CalibrationModel.tuningDirty = true;
+    renderForecastCalib();
+  };
+  const iaEl = document.getElementById('fcInitialAbstraction');
+  if (iaEl) iaEl.addEventListener('input', () => {
+    CalibrationModel.tuning.initialAbstractionAF = Number(iaEl.value);
+    markTuned(); renderForecast();
+  });
+  const ceEl = document.getElementById('fcConveyance');
+  if (ceEl) ceEl.addEventListener('input', () => {
+    CalibrationModel.tuning.conveyanceEfficiency = Number(ceEl.value) / 100;
+    markTuned(); renderForecast();
+  });
+  const seaEl = document.getElementById('fcSeason');
+  if (seaEl) seaEl.addEventListener('change', () => {
+    CalibrationModel.tuning.seasonalityETFactor = Number(seaEl.value);
+    markTuned(); renderForecast();
+  });
+  const antEl = document.getElementById('fcAntecedent');
+  if (antEl) antEl.addEventListener('input', () => {
+    CalibrationModel.tuning.antecedentMoistureFactor = Number(antEl.value);
+    markTuned(); renderForecast();
+  });
+  const scEl = document.getElementById('fcReleaseScale');
+  if (scEl) scEl.addEventListener('input', () => {
+    CalibrationModel.tuning.releaseScale = Number(scEl.value) / 100;
+    markTuned(); renderForecast();
+  });
+  const resetBtn = document.getElementById('btnForecastReset');
+  if (resetBtn) resetBtn.addEventListener('click', () => {
+    resetForecastTuning();
+    renderForecast();
+    showStatus('Forecast tuning reset to the calibrated values.', 'success');
+  });
+
+  const srcSel = document.getElementById('fcSourceSelect');
+  if (srcSel) srcSel.addEventListener('change', () => {
+    forecastSourceId = srcSel.value;
+    const usable = gages.filter((g) => g.ok && g.results);
+    const si = usable.findIndex((g) => g.id === forecastSourceId);
+    const downstream = si >= 0 ? usable.slice(si + 1) : [];
+    if (!downstream.some((g) => g.id === forecastTargetId)) {
+      forecastTargetId = downstream.length ? downstream[downstream.length - 1].id : null;
+    }
+    computeAll();
+  });
+  const tgtSel = document.getElementById('fcTargetSelect');
+  if (tgtSel) tgtSel.addEventListener('change', () => {
+    forecastTargetId = tgtSel.value;
+    computeAll();
+  });
 }
 
 /* ============================================================
@@ -869,6 +1295,7 @@ function init() {
 
   initChart();
   initBarChart();
+  wireForecastControls();
   setSelectionUi('Load gage data above, then click two points on the chart to define the storm start and end.', 'info');
 }
 

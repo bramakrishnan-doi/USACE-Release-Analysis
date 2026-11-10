@@ -9,6 +9,9 @@
 let clickStage = 0;
 let travelRows = [];
 let pendingConfig = null;   // saved configuration staged until its data finishes loading
+let lastForecast = null;    // most recent routed arrival forecast (UI + CSV + report reuse it)
+let forecastSourceId = null;
+let forecastTargetId = null;
 
 /* ============================================================
    Baseline reference construction (per gage)
@@ -512,9 +515,11 @@ function computeAll() {
   for (const g of gages) computeSite(g);
   if (eventStart && eventEnd) computeTravel();
   else travelRows = [];
+  calibrateForecastModel();
   renderGapsCard(true);
   renderWarnings();
   renderResults();
+  if (typeof renderForecast === 'function') renderForecast();
   updateChart();
 }
 
@@ -525,6 +530,607 @@ function clearSelection() {
 }
 
 /* ============================================================
+   Downstream Arrival Forecast
+   ------------------------------------------------------------
+   Calibrates transmission loss (initial abstraction + dynamic
+   conveyance efficiency) and wave routing (front/crest lag,
+   peak attenuation, recession dispersion) from the selected
+   historical event, then routes a proposed source hydrograph
+   to the selected downstream gage.
+   ============================================================ */
+const FORECAST_DEFAULTS = {
+  frontLagHours: 140,
+  crestLagHours: 96,
+  peakAttenuationRatio: 0.42,
+  dispersionK: 0.02,
+  initialAbstractionAF: 10000,
+  conveyanceEfficiency: 0.23,
+  seasonalityETFactor: 1.10,
+  antecedentMoistureFactor: 1.00,
+  releaseScale: 1.00
+};
+
+const CalibrationModel = {
+  calibrated: false,
+  sourceId: null,
+  targetId: null,
+  sourceLabel: '',
+  targetLabel: '',
+  eventLabel: '',
+  initialAbstractionAF: FORECAST_DEFAULTS.initialAbstractionAF,
+  conveyanceEfficiency: FORECAST_DEFAULTS.conveyanceEfficiency,
+  frontLagHours: FORECAST_DEFAULTS.frontLagHours,
+  crestLagHours: FORECAST_DEFAULTS.crestLagHours,
+  peakAttenuationRatio: FORECAST_DEFAULTS.peakAttenuationRatio,
+  dispersionK: FORECAST_DEFAULTS.dispersionK,
+  releaseAF: 0,
+  arrivedAF: 0,
+  netRecoveryPct: 0,
+  calibrationSource: 'Not calibrated — load at least two gages and select an event window.',
+  seasonalityETFactor: FORECAST_DEFAULTS.seasonalityETFactor,
+  antecedentMoistureFactor: FORECAST_DEFAULTS.antecedentMoistureFactor,
+  releaseScale: FORECAST_DEFAULTS.releaseScale,
+  tuning: {
+    initialAbstractionAF: FORECAST_DEFAULTS.initialAbstractionAF,
+    conveyanceEfficiency: FORECAST_DEFAULTS.conveyanceEfficiency,
+    seasonalityETFactor: FORECAST_DEFAULTS.seasonalityETFactor,
+    antecedentMoistureFactor: FORECAST_DEFAULTS.antecedentMoistureFactor,
+    releaseScale: FORECAST_DEFAULTS.releaseScale
+  },
+  tuningDirty: false,
+  tuningSignature: '',
+  notes: []
+};
+
+function fcClamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function fcPad2(n) {
+  return (n < 10 ? '0' : '') + n;
+}
+
+function fcMonthAbbr(m) {
+  return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m] || '';
+}
+
+function fcDateTimeLocal(ms) {
+  if (ms == null || !Number.isFinite(Number(ms))) return '—';
+  const d = new Date(Number(ms));
+  return fcMonthAbbr(d.getMonth()) + ' ' + d.getDate() + ', ' + d.getFullYear() + ' ' +
+    fcPad2(d.getHours()) + ':' + fcPad2(d.getMinutes());
+}
+
+function fcDateTimeShort(ms) {
+  const d = new Date(ms);
+  return fcMonthAbbr(d.getMonth()) + ' ' + d.getDate() + ' ' + fcPad2(d.getHours()) + ':' + fcPad2(d.getMinutes());
+}
+
+function fcDayKey(ms) {
+  const d = new Date(ms);
+  return d.getFullYear() + '-' + fcPad2(d.getMonth() + 1) + '-' + fcPad2(d.getDate());
+}
+
+function fcDayLabel(ms) {
+  const d = new Date(ms);
+  return fcMonthAbbr(d.getMonth()) + ' ' + d.getDate() + ', ' + d.getFullYear();
+}
+
+/* Restore the tuning controls to the freshly calibrated values
+   (user adjustments are deliberately not overwritten on every
+   recompute, only when the calibration dataset/reach changes
+   or the user presses Reset tuning). */
+function resetForecastTuning() {
+  const m = CalibrationModel;
+  const ia = Number.isFinite(m.initialAbstractionAF) ? m.initialAbstractionAF : FORECAST_DEFAULTS.initialAbstractionAF;
+  const ceff = Number.isFinite(m.conveyanceEfficiency) ? m.conveyanceEfficiency : FORECAST_DEFAULTS.conveyanceEfficiency;
+  m.tuning = {
+    initialAbstractionAF: Math.round(ia / 100) * 100,
+    conveyanceEfficiency: Math.round(ceff * 1000) / 1000,
+    seasonalityETFactor: FORECAST_DEFAULTS.seasonalityETFactor,
+    antecedentMoistureFactor: FORECAST_DEFAULTS.antecedentMoistureFactor,
+    releaseScale: FORECAST_DEFAULTS.releaseScale
+  };
+  m.seasonalityETFactor = m.tuning.seasonalityETFactor;
+  m.antecedentMoistureFactor = m.tuning.antecedentMoistureFactor;
+  m.releaseScale = m.tuning.releaseScale;
+  m.tuningDirty = false;
+}
+
+/* Recompute every calibrated term from the current event window.
+   Called by computeAll() after the per-gage volumes and travel
+   times are refreshed, so data/baseline/gap edits recalibrate. */
+function calibrateForecastModel() {
+  const m = CalibrationModel;
+  m.notes = [];
+  m.calibrated = false;
+  lastForecast = null;
+
+  if (!eventStart || !eventEnd) {
+    m.calibrationSource = 'Not calibrated — select a storm release window.';
+    m.notes.push('Select an event window (Step 2) to calibrate the forecast.');
+    return m;
+  }
+  const candidates = gages.filter((g) => g.ok && g.results);
+  if (candidates.length < 2) {
+    m.calibrationSource = 'Not calibrated — two gages with data are required.';
+    m.notes.push('Load at least two gages with data in the event window to calibrate the forecast.');
+    return m;
+  }
+
+  let src = candidates.find((g) => g.id === forecastSourceId);
+  if (!src) src = candidates[0];
+  const si = gages.indexOf(src);
+  const downstream = gages.slice(si + 1).filter((g) => g.ok && g.results);
+  if (!downstream.length) {
+    m.calibrationSource = 'Not calibrated — no downstream gage with data.';
+    m.notes.push('Choose a source gage that has a downstream gage after it in the gage list.');
+    return m;
+  }
+  let tgt = downstream.find((g) => g.id === forecastTargetId);
+  if (!tgt) tgt = downstream[downstream.length - 1];
+
+  const sres = src.results;
+  const tres = tgt.results;
+  const evS = eventStart.getTime();
+  const evE = eventEnd.getTime();
+  const vRel = Math.max(0, Number(sres.directAF) || 0);
+  const vArr = Math.max(0, Number(tres.directAF) || 0);
+  if (!(vRel > 0)) {
+    m.calibrationSource = 'Not calibrated — no release volume at the source gage.';
+    m.notes.push('The source gage has no direct release volume in this window — adjust its baseline or the event window.');
+    return m;
+  }
+
+  // Initial abstraction: source volume spent before the downstream wetting front arrives.
+  const sRise = sres.riseTimeMs != null ? sres.riseTimeMs : evS;
+  const tRise = tres.riseTimeMs;
+  let ia = null;
+  if (tRise != null && tRise > evS) {
+    ia = integrateExcessAF(src, evS, Math.min(tRise, evE));
+  }
+  if (!(ia > 0)) {
+    ia = Math.min(12000, vRel * 0.15);
+    m.notes.push('Downstream first rise was not detected — initial abstraction fell back to ' +
+      Math.round(ia).toLocaleString('en-US') + ' AF.');
+  }
+  ia = fcClamp(ia, 0, vRel * 0.85);
+
+  // Dynamic conveyance efficiency: post-priming arrived ÷ released.
+  let ceff = (vRel - ia) > 1e-6 ? vArr / (vRel - ia) : 0;
+  if (!Number.isFinite(ceff)) ceff = 0;
+  if (ceff > 0.95) {
+    ceff = 0.95;
+    m.notes.push('Conveyance efficiency exceeded 95% — clamped; check baseline separation at the downstream gage.');
+  } else if (ceff < 0.02) {
+    ceff = vArr > 0 ? Math.min(0.45, Math.max(0.02, vArr / Math.max(vRel, 1e-9))) : 0.02;
+    m.notes.push('Conveyance efficiency was near zero — clamped to ' + (ceff * 100).toFixed(1) + '%; verify the downstream record and baseline.');
+  }
+
+  // Front lag: first-rise to first-rise. Crest lag: peak-to-peak.
+  let frontH = (tRise != null && sRise != null) ? (tRise - sRise) / 3600e3 : FORECAST_DEFAULTS.frontLagHours;
+  if (!Number.isFinite(frontH) || frontH <= 0) {
+    frontH = FORECAST_DEFAULTS.frontLagHours;
+    m.notes.push('Front lag could not be measured — using the ' + frontH + ' h default.');
+  }
+  let crestH = (sres.peakTimeMs != null && tres.peakTimeMs != null)
+    ? (tres.peakTimeMs - sres.peakTimeMs) / 3600e3
+    : FORECAST_DEFAULTS.crestLagHours;
+  if (!Number.isFinite(crestH) || crestH <= 0) {
+    crestH = FORECAST_DEFAULTS.crestLagHours;
+    m.notes.push('Crest lag could not be measured — using the ' + crestH + ' h default.');
+  }
+  const riseToPeakH = sres.peakTimeMs != null ? Math.max(0, (sres.peakTimeMs - sRise) / 3600e3) : 0;
+  if (frontH > riseToPeakH + crestH) {
+    frontH = Math.max(1, riseToPeakH + crestH);
+    m.notes.push('Front lag reduced to ' + frontH.toFixed(1) + ' h so the routed peak falls after first water arrival.');
+  }
+
+  // Peak attenuation: downstream peak excess ÷ upstream peak excess.
+  let alpha = sres.peakExcess > 0 ? tres.peakExcess / sres.peakExcess : FORECAST_DEFAULTS.peakAttenuationRatio;
+  if (!Number.isFinite(alpha) || alpha <= 0) alpha = FORECAST_DEFAULTS.peakAttenuationRatio;
+  alpha = fcClamp(alpha, 0.02, 1.5);
+
+  // Recession decay rate from the downstream hydrograph (bank-storage tail).
+  let k = estimateRecessionK(tgt, tres);
+  if (!Number.isFinite(k) || k <= 0) k = FORECAST_DEFAULTS.dispersionK;
+
+  const netRecoveryPct = vRel > 0 ? (100 * vArr) / vRel : 0;
+  const srcLabel = src.label || src.id;
+  const tgtLabel = tgt.label || tgt.id;
+  const eventLabel = fcDateTimeLocal(evS) + ' → ' + fcDateTimeLocal(evE);
+
+  m.calibrated = true;
+  m.sourceId = src.id;
+  m.targetId = tgt.id;
+  m.sourceLabel = srcLabel;
+  m.targetLabel = tgtLabel;
+  m.eventLabel = eventLabel;
+  m.initialAbstractionAF = ia;
+  m.conveyanceEfficiency = ceff;
+  m.frontLagHours = frontH;
+  m.crestLagHours = crestH;
+  m.peakAttenuationRatio = alpha;
+  m.dispersionK = k;
+  m.releaseAF = vRel;
+  m.arrivedAF = vArr;
+  m.netRecoveryPct = netRecoveryPct;
+  m.calibrationSource = 'Calibrated from ' + eventLabel + ': ' + netRecoveryPct.toFixed(1) +
+    '% net recovery (' + srcLabel + ' → ' + tgtLabel + ')';
+  forecastSourceId = src.id;
+  forecastTargetId = tgt.id;
+
+  // Reset user tuning only when the calibration dataset/reach changes.
+  const sig = [evS, evE, src.id, tgt.id, src.readings.length, tgt.readings.length,
+    src.gaps.map((g) => g.fill || '').join('/'), tgt.gaps.map((g) => g.fill || '').join('/'),
+    JSON.stringify(src.baseline), JSON.stringify(tgt.baseline),
+    Math.round(vRel * 100), Math.round(vArr * 100), Math.round(ia * 100),
+    Math.round(ceff * 1e4), Math.round(frontH * 100), Math.round(crestH * 100),
+    Math.round(alpha * 1e4), Math.round(k * 1e5)].join('|');
+  if (sig !== m.tuningSignature) {
+    m.tuningSignature = sig;
+    resetForecastTuning();
+  }
+  return m;
+}
+
+/* Integrate the source's baseline-removed flow over [t0, t1], in AF. */
+function integrateExcessAF(site, t0, t1) {
+  const iv = site && site.results ? site.results.intervals : null;
+  if (!iv || iv.length < 2 || !(t1 > t0)) return 0;
+  let af = 0;
+  for (let i = 0; i < iv.length - 1; i++) {
+    const a = iv[i], b = iv[i + 1];
+    const s = Math.max(a.t, t0), e = Math.min(b.t, t1);
+    if (!(e > s)) continue;
+    const exA = Math.max(0, a.q - a.base);
+    const exB = Math.max(0, b.q - b.base);
+    const span = Math.max(1, b.t - a.t);
+    const f0 = (s - a.t) / span;
+    const f1 = (e - a.t) / span;
+    const q0 = exA + (exB - exA) * f0;
+    const q1 = exA + (exB - exA) * f1;
+    af += (q0 + q1) / 2 * ((e - s) / 1000) / 43560;
+  }
+  return af;
+}
+
+/* Exponential recession rate k (per hour) from the downstream hydrograph. */
+function estimateRecessionK(site, res) {
+  if (!res || res.peakTimeMs == null || !(res.peakExcess > 0)) return FORECAST_DEFAULTS.dispersionK;
+  const thr = 0.05 * res.peakExcess;
+  let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const p of res.intervals) {
+    if (p.t <= res.peakTimeMs) continue;
+    const ex = Math.max(0, p.q - p.base);
+    if (ex < thr) continue;
+    const x = (p.t - res.peakTimeMs) / 3600e3;
+    const y = Math.log(ex);
+    n++; sx += x; sy += y; sxx += x * x; sxy += x * y;
+  }
+  if (n < 4) return FORECAST_DEFAULTS.dispersionK;
+  const den = n * sxx - sx * sx;
+  if (Math.abs(den) < 1e-9) return FORECAST_DEFAULTS.dispersionK;
+  const slope = (n * sxy - sx * sy) / den;
+  const k = -slope;
+  if (!Number.isFinite(k) || k <= 0) return FORECAST_DEFAULTS.dispersionK;
+  return fcClamp(k, 0.002, 0.08);
+}
+
+function interpForecastPoints(points, t) {
+  if (!points || !points.length) return 0;
+  if (t <= points[0].t) return points[0].v;
+  if (t >= points[points.length - 1].t) return points[points.length - 1].v;
+  let lo = 0, hi = points.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].t <= t) lo = mid; else hi = mid;
+  }
+  const a = points[lo], b = points[hi];
+  const span = b.t - a.t;
+  if (!(span > 0)) return a.v;
+  return a.v + (b.v - a.v) * ((t - a.t) / span);
+}
+
+function resampleForecastHourly(points, startMs, endMs) {
+  if (!points || points.length < 2) return points ? points.slice() : [];
+  const step = 3600e3;
+  const out = [];
+  const t0 = Math.ceil(startMs / step) * step;
+  for (let t = t0; t <= endMs; t += step) {
+    out.push({ t: t, v: Math.max(0, interpForecastPoints(points, t)) });
+  }
+  if (out.length < 2) return points.slice();
+  return out;
+}
+
+function integrateForecastSeries(series) {
+  if (!series || series.length < 2) return 0;
+  let af = 0;
+  for (let i = 1; i < series.length; i++) {
+    const dtSec = (series[i].t - series[i - 1].t) / 1000;
+    if (!(dtSec > 0)) continue;
+    af += (series[i - 1].v + series[i].v) / 2 * dtSec / 43560;
+  }
+  return af;
+}
+
+function valueInForecastSeries(series, t) {
+  if (!series || !series.length) return 0;
+  if (t < series[0].t || t > series[series.length - 1].t) return 0;
+  return interpForecastPoints(series, t);
+}
+
+/* The proposed schedule is the active source hydrograph
+   (baseline-removed), resampled to a uniform hourly grid. */
+function buildForecastSchedule() {
+  const src = gages.find((g) => g.id === CalibrationModel.sourceId);
+  if (!src || !src.results || !eventStart || !eventEnd) return [];
+  const pts = src.results.intervals.map((p) => ({ t: p.t, v: Math.max(0, p.q - p.base) }));
+  return resampleForecastHourly(pts, eventStart.getTime(), eventEnd.getTime());
+}
+
+/* Numerically route the proposed source schedule to the downstream
+   gage.  Returns hourly series, daily accounting, and KPI summary. */
+function computeArrivalForecast(sourceSchedule, calibrationParams) {
+  const m = CalibrationModel;
+  const p = calibrationParams || m.tuning || {};
+  const srcPts = (sourceSchedule || [])
+    .map((r) => ({
+      t: Number(r.t != null ? r.t : r.timestamp),
+      v: Math.max(0, Number(r.v != null ? r.v : r.flow))
+    }))
+    .filter((r) => Number.isFinite(r.t) && Number.isFinite(r.v))
+    .sort((a, b) => a.t - b.t);
+  if (srcPts.length < 2) return null;
+
+  const numOr = (key, fallback) => {
+    const v = Number(p[key]);
+    return Number.isFinite(v) ? v : fallback;
+  };
+  const ia = Math.max(0, numOr('initialAbstractionAF', m.initialAbstractionAF || FORECAST_DEFAULTS.initialAbstractionAF));
+  const ceff = fcClamp(numOr('conveyanceEfficiency', m.conveyanceEfficiency || FORECAST_DEFAULTS.conveyanceEfficiency), 0, 1);
+  const season = fcClamp(numOr('seasonalityETFactor', m.seasonalityETFactor || FORECAST_DEFAULTS.seasonalityETFactor), 0.5, 1.5);
+  const ante = fcClamp(numOr('antecedentMoistureFactor', m.antecedentMoistureFactor || FORECAST_DEFAULTS.antecedentMoistureFactor), 0.5, 1.5);
+  const scale = fcClamp(numOr('releaseScale', m.releaseScale || FORECAST_DEFAULTS.releaseScale), 0.1, 3);
+  const frontH = Math.max(1, numOr('frontLagHours', m.frontLagHours || FORECAST_DEFAULTS.frontLagHours));
+  const crestH = Math.max(0, numOr('crestLagHours', m.crestLagHours || FORECAST_DEFAULTS.crestLagHours));
+  const alpha = fcClamp(numOr('peakAttenuationRatio', m.peakAttenuationRatio || FORECAST_DEFAULTS.peakAttenuationRatio), 0.02, 1.5);
+  const k = fcClamp(numOr('dispersionK', m.dispersionK || FORECAST_DEFAULTS.dispersionK), 0.001, 0.2);
+
+  const src = srcPts.map((r) => ({ t: r.t, v: r.v * scale }));
+  const srcStart = src[0].t;
+  const srcEnd = src[src.length - 1].t;
+  let srcPeakIdx = 0;
+  for (let i = 1; i < src.length; i++) {
+    if (src[i].v > src[srcPeakIdx].v) srcPeakIdx = i;
+  }
+  const srcPeakMs = src[srcPeakIdx].t;
+  const srcPeakCfs = src[srcPeakIdx].v;
+  const vRelease = integrateForecastSeries(src);
+  if (!(vRelease > 0)) return null;
+
+  // The calibrated front lag is measured first-rise → first-rise.  Anchor
+  // the time warp at the source hydrograph's first rise (not the arbitrary
+  // event-window start) so the routed leading edge lands at the calibrated
+  // downstream arrival.
+  const riseThr = 0.02 * srcPeakCfs;
+  let srcRiseMs = srcStart;
+  for (const r of src) {
+    if (r.v >= riseThr) { srcRiseMs = r.t; break; }
+  }
+  if (!(srcRiseMs < srcPeakMs)) srcRiseMs = srcStart;
+
+  const frontMs = frontH * 3600e3;
+  const crestMs = crestH * 3600e3;
+  let targetStart = srcRiseMs + frontMs;
+  let targetPeak = srcPeakMs + crestMs;
+  if (!(targetPeak > targetStart + 3600e3)) {
+    targetStart = targetPeak - Math.max(3600e3, (srcPeakMs - srcRiseMs) * 0.25);
+    if (targetStart < srcRiseMs) targetStart = srcRiseMs;
+  }
+  const targetSrcEnd = targetPeak + Math.max(0, srcEnd - srcPeakMs);
+
+  // Time-warp the source hydrograph: source first rise -> front arrival,
+  // source peak -> crest arrival; then diffuse the routed pulse.
+  const step = 3600e3;
+  const raw = [];
+  const firstT = Math.ceil(targetStart / step) * step;
+  const lastT = Math.floor(targetSrcEnd / step) * step;
+  for (let t = firstT; t <= lastT; t += step) {
+    let st;
+    if (t <= targetPeak) {
+      const spanT = Math.max(1, targetPeak - targetStart);
+      st = srcRiseMs + (t - targetStart) * (srcPeakMs - srcRiseMs) / spanT;
+    } else {
+      st = srcPeakMs + (t - targetPeak);
+    }
+    raw.push({ t: t, v: Math.max(0, alpha * interpForecastPoints(src, st)) });
+  }
+  if (raw.length < 2) return null;
+
+  // Gaussian diffusion (longitudinal spreading + bank storage).
+  const sigmaH = fcClamp(0.15 / k, 2, 12);
+  const radius = Math.max(1, Math.ceil(3 * sigmaH));
+  const weights = [];
+  for (let j = -radius; j <= radius; j++) weights.push(Math.exp(-0.5 * Math.pow(j / sigmaH, 2)));
+  const wsum = weights.reduce((a, b) => a + b, 0);
+  const smooth = raw.map((r, i) => {
+    let sum = 0;
+    for (let j = -radius; j <= radius; j++) {
+      const idx = i + j;
+      if (idx >= 0 && idx < raw.length) sum += raw[idx].v * weights[j + radius];
+    }
+    return { t: r.t, v: sum / wsum };
+  });
+
+  // Exponential bank-storage tail after the routed source ends.
+  const tailHours = Math.min(360, Math.max(72, Math.round(6 / Math.max(k, 0.005))));
+  const tailBase = smooth[smooth.length - 1].v;
+  const tailStart = smooth[smooth.length - 1].t;
+  const arrival = smooth.slice();
+  for (let h = 1; h <= tailHours; h++) {
+    const q = tailBase * Math.exp(-k * h);
+    if (q < 0.05) break;
+    arrival.push({ t: tailStart + h * step, v: q });
+  }
+
+  // Enforce the calibrated volumetric projection by normalizing the
+  // routed series.  This is the numerical ∫Q dt = V_Dome constraint.
+  const rawArrAF = integrateForecastSeries(arrival);
+  const targetArrAF = Math.max(0, ceff * Math.max(0, vRelease - ia) * season * ante);
+  const arrScale = rawArrAF > 1e-9 ? targetArrAF / rawArrAF : 0;
+  for (const r of arrival) r.v *= arrScale;
+
+  // Build the common release/arrival timeline on an hourly grid.
+  const endMs = Math.max(srcEnd, arrival.length ? arrival[arrival.length - 1].t : srcEnd);
+  const gridStart = Math.ceil(srcStart / step) * step;
+  const gridEnd = Math.ceil(endMs / step) * step;
+  const hourly = [];
+  for (let t = gridStart; t <= gridEnd; t += step) {
+    const rel = t <= srcEnd ? Math.max(0, interpForecastPoints(src, t)) : 0;
+    const arr = valueInForecastSeries(arrival, t);
+    hourly.push({
+      timestamp: t,
+      dateLabel: fcDateTimeShort(t),
+      releaseFlow: rel,
+      arrivingFlow: arr,
+      cumReleaseAF: 0,
+      cumArrivingAF: 0
+    });
+  }
+  if (hourly.length < 2) return null;
+
+  // Grid re-normalization: the hourly series is the product the user
+  // sees/exports, so make its integral match the calibrated volume.
+  let gridArrAF = 0;
+  for (let i = 1; i < hourly.length; i++) {
+    const dtSec = (hourly[i].timestamp - hourly[i - 1].timestamp) / 1000;
+    gridArrAF += (hourly[i - 1].arrivingFlow + hourly[i].arrivingFlow) / 2 * dtSec / 43560;
+  }
+  if (gridArrAF > 1e-9 && targetArrAF > 0) {
+    const corr = targetArrAF / gridArrAF;
+    for (const r of hourly) r.arrivingFlow *= corr;
+  }
+  let cumRel = 0, cumArr = 0;
+  for (let i = 0; i < hourly.length; i++) {
+    if (i > 0) {
+      const dtSec = (hourly[i].timestamp - hourly[i - 1].timestamp) / 1000;
+      cumRel += (hourly[i - 1].releaseFlow + hourly[i].releaseFlow) / 2 * dtSec / 43560;
+      cumArr += (hourly[i - 1].arrivingFlow + hourly[i].arrivingFlow) / 2 * dtSec / 43560;
+    }
+    hourly[i].cumReleaseAF = cumRel;
+    hourly[i].cumArrivingAF = cumArr;
+  }
+
+  // KPIs from the final hourly product.
+  let peakArrivingCfs = 0, peakArrivalMs = null;
+  for (const r of hourly) {
+    if (r.arrivingFlow > peakArrivingCfs) {
+      peakArrivingCfs = r.arrivingFlow;
+      peakArrivalMs = r.timestamp;
+    }
+  }
+  let frontArrivalMs = null;
+  if (peakArrivingCfs > 0) {
+    const thr = Math.max(0.5, 0.01 * peakArrivingCfs);
+    for (const r of hourly) {
+      if (r.arrivingFlow >= thr) { frontArrivalMs = r.timestamp; break; }
+    }
+  }
+  const last = hourly[hourly.length - 1];
+  const totalReleaseAF = last.cumReleaseAF;
+  const totalArrivedAF = last.cumArrivingAF;
+  const netRecoveryPct = totalReleaseAF > 0 ? (100 * totalArrivedAF) / totalReleaseAF : 0;
+
+  // Daily volumetric accounting (calendar-day buckets).
+  const dayMap = new Map();
+  for (let i = 1; i < hourly.length; i++) {
+    const a = hourly[i - 1], b = hourly[i];
+    const dtSec = (b.timestamp - a.timestamp) / 1000;
+    if (!(dtSec > 0)) continue;
+    const relAF = (a.releaseFlow + b.releaseFlow) / 2 * dtSec / 43560;
+    const arrAF = (a.arrivingFlow + b.arrivingFlow) / 2 * dtSec / 43560;
+    const key = fcDayKey(b.timestamp);
+    let d = dayMap.get(key);
+    if (!d) { d = { date: fcDayLabel(b.timestamp), releaseAF: 0, arrivingAF: 0 }; dayMap.set(key, d); }
+    d.releaseAF += relAF;
+    d.arrivingAF += arrAF;
+  }
+  const daily = [];
+  let cumLoss = 0;
+  for (const key of Array.from(dayMap.keys()).sort()) {
+    const d = dayMap.get(key);
+    const loss = d.releaseAF - d.arrivingAF;
+    cumLoss += loss;
+    daily.push({
+      date: d.date,
+      releaseAF: d.releaseAF,
+      arrivingAF: d.arrivingAF,
+      transmissionLossAF: loss,
+      cumulativeLossAF: cumLoss,
+      recoveryPct: d.releaseAF > 0 ? (100 * d.arrivingAF) / d.releaseAF : null
+    });
+  }
+
+  const notes = m.notes.slice();
+  if (Math.abs(scale - 1) > 1e-9) {
+    notes.push('Proposed release = observed direct source hydrograph × ' + scale.toFixed(2) + '.');
+  }
+  if (vRelease <= ia) {
+    notes.push('The proposed release (' + Math.round(vRelease).toLocaleString('en-US') +
+      ' AF) is below the initial abstraction (' + Math.round(ia).toLocaleString('en-US') +
+      ' AF) — no downstream arrival is projected.');
+  }
+  if (!(targetArrAF > 0)) {
+    notes.push('The calibrated volume projection is zero — check the release volume, initial abstraction and conveyance efficiency.');
+  }
+
+  return {
+    hourly: hourly,
+    daily: daily,
+    summary: {
+      sourceLabel: m.sourceLabel,
+      targetLabel: m.targetLabel,
+      releaseStartMs: srcStart,
+      releaseEndMs: srcEnd,
+      forecastEndMs: last.timestamp,
+      totalReleaseAF: totalReleaseAF,
+      totalArrivedAF: totalArrivedAF,
+      transmissionLossAF: totalReleaseAF - totalArrivedAF,
+      netRecoveryPct: netRecoveryPct,
+      billionGallons: totalArrivedAF * 325851.428571 / 1e9,
+      peakArrivingCfs: peakArrivingCfs,
+      peakArrivalMs: peakArrivalMs,
+      peakSourceCfs: srcPeakCfs,
+      peakAttenuationRatio: srcPeakCfs > 0 ? peakArrivingCfs / srcPeakCfs : 0,
+      frontArrivalMs: frontArrivalMs,
+      frontLagHours: frontArrivalMs != null ? (frontArrivalMs - srcStart) / 3600e3 : null,
+      crestLagHours: peakArrivalMs != null ? (peakArrivalMs - srcPeakMs) / 3600e3 : null,
+      initialAbstractionAF: ia,
+      conveyanceEfficiency: ceff,
+      seasonalityETFactor: season,
+      antecedentMoistureFactor: ante,
+      releaseScale: scale,
+      modelFrontLagHours: frontH,
+      modelCrestLagHours: crestH,
+      modelPeakAttenuation: alpha,
+      modelDispersionK: k,
+      calibrationSource: m.calibrationSource
+    },
+    notes: notes,
+    sourceSchedule: src
+  };
+}
+
+/* Async public API requested by the forecast specification.  The
+   computation is deterministic and CPU-bound, so the internal
+   engine is synchronous; this wrapper lets callers await it. */
+async function generateArrivalForecast(sourceSchedule, calibrationParams) {
+  return computeArrivalForecast(sourceSchedule, calibrationParams);
+}
+
+/* ============================================================
    CSV export
    ============================================================ */
 function csvField(v) {
@@ -532,7 +1138,7 @@ function csvField(v) {
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
-function exportCSV() {
+function buildCsvText() {
   const evSms = eventStart ? eventStart.getTime() : null;
   const evEms = eventEnd ? eventEnd.getTime() : null;
   const L = [];
@@ -581,6 +1187,43 @@ function exportCSV() {
   });
 
   L.push('');
+  L.push('# DOWNSTREAM ARRIVAL FORECAST (hourly routed series)');
+  if (lastForecast && lastForecast.summary) {
+    const fs = lastForecast.summary;
+    L.push('# Source: ' + fs.sourceLabel + ' -> Target: ' + fs.targetLabel);
+    L.push('# Calibration: ' + fs.calibrationSource);
+    L.push('# Scenario: release x' + fs.releaseScale.toFixed(2) +
+      ', seasonality x' + fs.seasonalityETFactor.toFixed(2) +
+      ', antecedent x' + fs.antecedentMoistureFactor.toFixed(2));
+    L.push('timestamp_utc,date_local,Release_Flow_cfs,Forecast_Dome_Flow_cfs,Release_Cumulative_AF,Cumulative_Dome_AF');
+    for (const r of lastForecast.hourly) {
+      L.push([
+        new Date(r.timestamp).toISOString(),
+        csvField(r.dateLabel),
+        r.releaseFlow.toFixed(2),
+        r.arrivingFlow.toFixed(2),
+        r.cumReleaseAF.toFixed(3),
+        r.cumArrivingAF.toFixed(3)
+      ].join(','));
+    }
+    L.push('');
+    L.push('# FORECAST DAILY ACCOUNTING');
+    L.push('date,Dam_Release_AF,Arrival_at_Dome_AF,Estimated_River_Loss_AF,Cumulative_Loss_AF,Recovery_Pct');
+    for (const d of lastForecast.daily) {
+      L.push([
+        csvField(d.date),
+        d.releaseAF.toFixed(3),
+        d.arrivingAF.toFixed(3),
+        d.transmissionLossAF.toFixed(3),
+        d.cumulativeLossAF.toFixed(3),
+        d.recoveryPct == null ? '' : d.recoveryPct.toFixed(1)
+      ].join(','));
+    }
+  } else {
+    L.push('# Not available — select an event window with two usable gages.');
+  }
+
+  L.push('');
   L.push('# FULL SERIES (one block per gage; includes filled readings, flagged)');
   L.push('# value_source: measured | fill method used');
   for (const g of okG) {
@@ -592,7 +1235,11 @@ function exportCSV() {
     L.push('');
   }
 
-  const blob = new Blob([L.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  return L.join('\r\n');
+}
+
+function exportCSV() {
+  const blob = new Blob([buildCsvText()], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   const stamp = moment().format('YYYYMMDD-HHmm');
@@ -602,7 +1249,7 @@ function exportCSV() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  showStatus('CSV exported (' + (a.download) + '). Includes per-gage summary, travel rows, and full series with fill flags.', 'success');
+  showStatus('CSV exported (<strong>' + a.download + '</strong>). Includes per-gage summary, travel rows, full fill-flagged series, and the hourly routed forecast.', 'success');
 }
 
 /* ============================================================
@@ -620,6 +1267,7 @@ const REPORT_CSS =
   '.rpt-band .sub{font-size:0.78rem;opacity:0.92;margin-top:3px;}' +
   '.rpt-band .tag{font-size:0.72rem;background:rgba(255,255,255,0.16);padding:3px 10px;border-radius:12px;white-space:nowrap;}' +
   'h2{font-size:1.02rem;margin:26px 0 10px;}' +
+  'h3{font-size:0.9rem;margin:18px 0 8px;}' +
   '.meta{font-size:0.8rem;color:var(--muted);margin:4px 0 12px;line-height:1.6;}' +
   '.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:8px;}' +
   '.kpi{border:1px solid var(--border);border-radius:8px;padding:12px 14px;background:#fff;}' +
@@ -788,12 +1436,65 @@ function buildReportHtml() {
   });
   html += '</tbody></table>';
 
+  /* --- downstream arrival forecast --- */
+  if (lastForecast && lastForecast.summary) {
+    const fs = lastForecast.summary;
+    html += '<h2>Downstream arrival forecast</h2>' +
+      '<div class="meta">' + esc(fs.calibrationSource) + '<br/>' +
+      'Proposed release = observed direct source hydrograph × ' + fmtNum(fs.releaseScale, 2) +
+      ' · seasonality ×' + fmtNum(fs.seasonalityETFactor, 2) +
+      ' · antecedent ×' + fmtNum(fs.antecedentMoistureFactor, 2) + '.</div>' +
+      '<div class="kpi-grid">' +
+      '<div class="kpi"><div class="kpi-label">Projected volume at ' + esc(fs.targetLabel) + '</div>' +
+      '<div class="kpi-value">' + fmtNum(fs.totalArrivedAF, 0) + ' AF</div>' +
+      '<div class="kpi-sub">' + fmtNum(fs.billionGallons, 2) + ' billion gallons</div></div>' +
+      '<div class="kpi"><div class="kpi-label">Net recovery rate</div>' +
+      '<div class="kpi-value">' + fmtNum(fs.netRecoveryPct, 1) + '%</div>' +
+      '<div class="kpi-sub">' + fmtNum(fs.totalReleaseAF, 0) + ' AF released · ' + fmtNum(fs.transmissionLossAF, 0) + ' AF lost</div></div>' +
+      '<div class="kpi"><div class="kpi-label">Forecast peak at ' + esc(fs.targetLabel) + '</div>' +
+      '<div class="kpi-value">' + fmtNum(fs.peakArrivingCfs, 0) + ' cfs</div>' +
+      '<div class="kpi-sub">' + esc(fmtDT(fs.peakArrivalMs)) + ' local</div></div>' +
+      '<div class="kpi"><div class="kpi-label">First water arrival</div>' +
+      '<div class="kpi-value">' + esc(fmtDT(fs.frontArrivalMs)) + '</div>' +
+      '<div class="kpi-sub">' + (fs.frontLagHours != null ? fmtNum(fs.frontLagHours, 0) + ' h after release start' : 'no positive arrival projected') + '</div></div>' +
+      '</div>';
+    if (forecastChart && forecastChart.canvas && forecastChart.canvas.toDataURL) {
+      html += '<img class="chart-img" alt="Release and projected downstream arrival hydrograph" src="' +
+        forecastChart.canvas.toDataURL('image/png') + '"/>';
+    }
+    html += '<h3>Daily volumetric accounting</h3><table class="data-table"><thead><tr><th>Date</th>' +
+      '<th class="num">Dam Release (AF)</th><th class="num">Arrival at ' + esc(fs.targetLabel) + ' (AF)</th>' +
+      '<th class="num">Estimated River Loss (AF)</th><th class="num">Cumulative Loss (AF)</th></tr></thead><tbody>';
+    for (const d of lastForecast.daily) {
+      html += '<tr><td>' + esc(d.date) + '</td>' +
+        '<td class="num">' + fmtNum(d.releaseAF, 1) + '</td>' +
+        '<td class="num">' + fmtNum(d.arrivingAF, 1) + '</td>' +
+        '<td class="num">' + fmtNum(d.transmissionLossAF, 1) + '</td>' +
+        '<td class="num">' + fmtNum(d.cumulativeLossAF, 1) + '</td></tr>';
+    }
+    html += '<tr style="font-weight:700;background:#f8fafc;"><td>Total</td>' +
+      '<td class="num">' + fmtNum(fs.totalReleaseAF, 1) + '</td>' +
+      '<td class="num">' + fmtNum(fs.totalArrivedAF, 1) + '</td>' +
+      '<td class="num">' + fmtNum(fs.transmissionLossAF, 1) + '</td>' +
+      '<td class="num">' + fmtNum(fs.transmissionLossAF, 1) + '</td></tr>';
+    html += '</tbody></table>';
+    html += '<div class="doc-body" style="margin-top:10px;"><p><strong>Routing notes.</strong> ' +
+      'Initial abstraction I<sub>a</sub> = ' + fmtNum(fs.initialAbstractionAF, 0) + ' AF; ' +
+      'C<sub>eff</sub> = ' + fmtNum(fs.conveyanceEfficiency * 100, 1) + '%; ' +
+      'front lag = ' + fmtNum(fs.modelFrontLagHours, 0) + ' h; ' +
+      'crest lag = ' + fmtNum(fs.modelCrestLagHours, 0) + ' h; ' +
+      'peak attenuation α = ' + fmtNum(fs.modelPeakAttenuation, 2) + '; ' +
+      'dispersion k = ' + fmtNum(fs.modelDispersionK, 3) + '/h. ' +
+      'The hourly arrival series is normalized so its integral equals ' +
+      'C<sub>eff</sub> × (V<sub>release</sub> − I<sub>a</sub>) × Φ<sub>season</sub> × Φ<sub>antecedent</sub>.</p></div>';
+  }
+
   /* --- diagnostics & method notes --- */
   const warnEl = document.getElementById('warningsContainer');
   if (warnEl && warnEl.innerHTML) {
     // strip app-navigation phrasing that makes no sense in a standalone file
     const warnHtml = warnEl.innerHTML
-      .split('— choose a fill action in Step 5 or accept the reduced accuracy.').join('');
+      .split('— choose a fill action in Step 6 or accept the reduced accuracy.').join('');
     html += '<h2>Diagnostics &amp; data-quality notes</h2>' + warnHtml;
   }
   const docEl = document.querySelector('details.method-doc .doc-body');
@@ -802,7 +1503,8 @@ function buildReportHtml() {
   } else {
     html += '<h2>Method notes</h2><div class="doc-body">' +
       '<p><strong>Volume.</strong> Direct storm volume integrates max(0, Q − baseline); total integrates raw Q. AF = cfs × Δt (s) / 43,560; 1 cfs-day = 1.98347 AF.</p>' +
-      '<p><strong>Travel time.</strong> Peak-to-peak: event-window peak time difference between gages.</p></div>';
+      '<p><strong>Travel time.</strong> Peak-to-peak: event-window peak time difference between gages.</p>' +
+      '<p><strong>Arrival forecast.</strong> Initial abstraction, conveyance efficiency, front/crest lag, peak attenuation and recession decay are calibrated from the selected event. The proposed source hydrograph is time-warped (front and crest lags), attenuated, diffusively smoothed, given an exponential bank-storage tail, and normalized to the calibrated volumetric projection.</p></div>';
   }
 
   html += '<div class="foot">Report generated by USACE Release Analysis from live USGS Water Data (OGC API — continuous instantaneous discharge, parameter 00060). ' +
@@ -865,6 +1567,18 @@ function saveConfig() {
     event: (eventStart && eventEnd)
       ? { start: eventStart.toISOString(), end: eventEnd.toISOString() }
       : null,
+    forecast: CalibrationModel.calibrated ? {
+      sourceId: CalibrationModel.sourceId,
+      targetId: CalibrationModel.targetId,
+      tuning: {
+        initialAbstractionAF: CalibrationModel.tuning.initialAbstractionAF,
+        conveyanceEfficiency: CalibrationModel.tuning.conveyanceEfficiency,
+        seasonalityETFactor: CalibrationModel.tuning.seasonalityETFactor,
+        antecedentMoistureFactor: CalibrationModel.tuning.antecedentMoistureFactor,
+        releaseScale: CalibrationModel.tuning.releaseScale
+      },
+      tuningDirty: CalibrationModel.tuningDirty
+    } : null,
     baselines: {},
     fills: {}
   };
@@ -893,7 +1607,7 @@ function saveConfig() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  showStatus('Configuration saved (<strong>' + a.download + '</strong>) — gages, data window, event window, baselines, gap fills, volume basis and lag. Restore it any time with <strong>Load Config</strong>.', 'success');
+  showStatus('Configuration saved (<strong>' + a.download + '</strong>) — gages, data window, event window, baselines, gap fills, volume basis, lag and forecast tuning. Restore it any time with <strong>Load Config</strong>.', 'success');
 }
 
 function loadConfigFile(file) {
@@ -1002,7 +1716,39 @@ function applyPendingConfig() {
     }
   }
 
+  if (cfg.forecast) {
+    if (cfg.forecast.sourceId) forecastSourceId = cfg.forecast.sourceId;
+    if (cfg.forecast.targetId) forecastTargetId = cfg.forecast.targetId;
+  }
+
   computeAll();
   renderBaselinesCard();
+
+  // Re-apply saved forecast tuning after calibration has refreshed the
+  // calibrated values (computeAll resets tuning only when the reach/data changes).
+  if (cfg.forecast && cfg.forecast.tuning && CalibrationModel.calibrated) {
+    const ft = cfg.forecast.tuning;
+    const num = (k) => Number(ft[k]);
+    if (Number.isFinite(num('initialAbstractionAF'))) {
+      CalibrationModel.tuning.initialAbstractionAF = Math.max(0, num('initialAbstractionAF'));
+    }
+    if (Number.isFinite(num('conveyanceEfficiency'))) {
+      CalibrationModel.tuning.conveyanceEfficiency = fcClamp(num('conveyanceEfficiency'), 0, 1);
+    }
+    if (Number.isFinite(num('seasonalityETFactor'))) {
+      const sea = num('seasonalityETFactor');
+      CalibrationModel.tuning.seasonalityETFactor = [1.00, 1.10, 1.15].some((x) => Math.abs(x - sea) < 0.001) ? sea : 1.10;
+    }
+    if (Number.isFinite(num('antecedentMoistureFactor'))) {
+      CalibrationModel.tuning.antecedentMoistureFactor = fcClamp(num('antecedentMoistureFactor'), 0.5, 1.5);
+    }
+    if (Number.isFinite(num('releaseScale'))) {
+      CalibrationModel.tuning.releaseScale = fcClamp(num('releaseScale'), 0.1, 3);
+    }
+    CalibrationModel.tuningDirty = !!cfg.forecast.tuningDirty;
+    renderForecast();
+    notes.push('forecast tuning');
+  }
+
   showStatus('Saved configuration applied — ' + (notes.length ? notes.join(' · ') : 'form settings') + '. Adjust anything and results update instantly.', 'success');
 }

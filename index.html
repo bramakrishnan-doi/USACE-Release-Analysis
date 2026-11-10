@@ -268,11 +268,43 @@
       details.method-doc code { background: #f1f5f9; border-radius: 4px; padding: 1px 5px; font-size: 0.76rem; }
 
       /* Card display order — operational flow:
-         gages → plot → results → baselines → missing data → methodology */
+         gages → plot → results → arrival forecast → baselines → missing data → methodology */
       #cardResults { order: 3; }
-      #cardBaselines { order: 4; }
-      #cardMissingData { order: 5; }
-      #cardMethodology { order: 6; }
+      #cardForecast { order: 4; }
+      #cardBaselines { order: 5; }
+      #cardMissingData { order: 6; }
+      #cardMethodology { order: 7; }
+
+      /* Downstream arrival forecast */
+      .forecast-calib { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+      .calib-pill {
+        display: inline-flex; align-items: baseline; gap: 4px;
+        max-width: 100%; line-height: 1.4; white-space: normal;
+        font-size: 0.74rem; color: var(--color-text-muted);
+        background: #f1f5f9; border: 1px solid var(--color-border);
+        border-radius: 999px; padding: 3px 9px;
+      }
+      .calib-pill strong { color: var(--color-text-main); font-variant-numeric: tabular-nums; }
+      .calib-pill.tuned { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+      .forecast-reach {
+        display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end;
+        margin-top: 16px; padding: 14px 16px; background: #fbfdff;
+        border: 1px solid var(--color-border); border-radius: 8px;
+      }
+      .forecast-reach .form-item { min-width: 220px; flex: 1 1 220px; }
+      .forecast-controls {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 18px; margin: 16px 0 4px; padding: 16px;
+        border: 1px solid var(--color-border); border-radius: 8px; background: #fbfdff;
+      }
+      .forecast-control .label { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+      .forecast-control .control-val { font-weight: 700; color: var(--color-primary-hover); font-variant-numeric: tabular-nums; }
+      .forecast-control input[type="range"] { width: 100%; margin: 9px 0 5px; accent-color: var(--color-primary); }
+      .forecast-control .subtle { font-size: 0.72rem; color: var(--color-text-muted); line-height: 1.45; }
+      .forecast-control select.input { width: 100%; margin-top: 8px; }
+      .forecast-chart-wrap { position: relative; height: 330px; margin-top: 8px; }
+      .forecast-loss { color: var(--color-end); }
+      .forecast-gain { color: #166534; }
 
       /* Collapsible Missing Data card */
       .collapse-btn {
@@ -384,11 +416,11 @@
         </div>
       </div>
 
-      <!-- BASELINES (Step 4 — displayed after results via CSS order) -->
+      <!-- BASELINES (Step 5 — displayed after the forecast via CSS order) -->
       <div class="card" id="cardBaselines">
         <div class="card-header">
           <div>
-            <h2 class="card-title"><span class="step-badge">4</span>Baseline Separation (per gage)</h2>
+            <h2 class="card-title"><span class="step-badge">5</span>Baseline Separation (per gage)</h2>
             <p class="card-desc">Each gage gets its own baseflow construction — pick <em>Diurnal</em> for wastewater/pumping-influenced flows, <em>Flat</em> for steady natural baseflow, <em>Linear Ramp</em> when baseflow differs before vs after the event, or <em>None/Dry</em> for ephemeral reaches that normally carry no flow. Direct storm volume = observed flow minus baseline, floored at zero.</p>
           </div>
         </div>
@@ -397,11 +429,11 @@
         </div>
       </div>
 
-      <!-- MISSING DATA (Step 5 — displayed last, collapsible) -->
+      <!-- MISSING DATA (Step 6 — displayed last, collapsible) -->
       <div class="card" id="cardMissingData">
         <div class="card-header">
           <div>
-            <h2 class="card-title"><span class="step-badge">5</span>Missing Data (gaps) &amp; Fills
+            <h2 class="card-title"><span class="step-badge">6</span>Missing Data (gaps) &amp; Fills
               <span id="gapsSummary" style="display:none;"></span>
               <button class="collapse-btn" id="btnGapsCollapse" title="Collapse / expand this card" aria-label="Collapse or expand the Missing Data card">▾</button>
             </h2>
@@ -482,6 +514,96 @@
         </div>
       </div>
 
+      <!-- DOWNSTREAM ARRIVAL FORECAST (Step 4 — displayed after results via CSS order) -->
+      <div class="card" id="cardForecast">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title"><span class="step-badge">4</span>Downstream Arrival Forecast</h2>
+            <p class="card-desc">Routes the proposed release hydrograph from the source gage to the downstream gage, using transmission-loss and wave-routing parameters calibrated from the selected event window. Adjust the scenario controls to test operations — the projected arrival hydrograph, daily accounting and KPIs update instantly.</p>
+          </div>
+          <div class="card-actions">
+            <button class="btn btn-ghost btn-sm" id="btnForecastReset" disabled>↺ Reset tuning</button>
+          </div>
+        </div>
+
+        <div id="forecastEmpty" class="results-empty">
+          Load two or more gages (Step 1) and select a storm release window (Step 2) to calibrate the arrival forecast.
+        </div>
+
+        <div id="forecastContent" style="display:none;">
+          <div class="forecast-calib" id="forecastCalib"></div>
+
+          <div class="forecast-reach">
+            <div class="form-item">
+              <label class="label" for="fcSourceSelect">Release (source) gage</label>
+              <select class="input select-input" id="fcSourceSelect"></select>
+            </div>
+            <div class="form-item">
+              <label class="label" for="fcTargetSelect">Arrival (target) gage</label>
+              <select class="input select-input" id="fcTargetSelect"></select>
+            </div>
+          </div>
+
+          <div class="kpi-grid" id="forecastKpis"></div>
+
+          <div class="forecast-controls">
+            <div class="forecast-control">
+              <div class="label"><span>Initial abstraction (I<sub>a</sub>)</span><span class="control-val" id="fcIaVal">—</span></div>
+              <input type="range" id="fcInitialAbstraction" min="6000" max="16000" step="250" value="10000" />
+              <div class="subtle">Water absorbed before the wetting front advances. Calibrated: <span id="fcIaCalib">—</span>.</div>
+            </div>
+
+            <div class="forecast-control">
+              <div class="label"><span>Conveyance efficiency (C<sub>eff</sub>)</span><span class="control-val" id="fcEffVal">—</span></div>
+              <input type="range" id="fcConveyance" min="15" max="45" step="0.1" value="23" />
+              <div class="subtle">Share of post-abstraction release reaching the target. Calibrated: <span id="fcEffCalib">—</span>.</div>
+            </div>
+
+            <div class="forecast-control">
+              <div class="label"><span>Seasonality / ET factor</span><span class="control-val" id="fcSeasonVal">—</span></div>
+              <select class="input select-input" id="fcSeason">
+                <option value="1.00">1.00 — neutral</option>
+                <option value="1.10" selected>1.10 — hot / high ET</option>
+                <option value="1.15">1.15 — extreme ET</option>
+              </select>
+              <div class="subtle">Multiplied into the volumetric projection (Φ<sub>seasonality</sub>).</div>
+            </div>
+
+            <div class="forecast-control">
+              <div class="label"><span>Antecedent moisture factor</span><span class="control-val" id="fcAnteVal">—</span></div>
+              <input type="range" id="fcAntecedent" min="0.80" max="1.20" step="0.01" value="1.00" />
+              <div class="subtle">Wet antecedent conditions reduce losses (Φ<sub>antecedent</sub>).</div>
+            </div>
+
+            <div class="forecast-control">
+              <div class="label"><span>Proposed release scale</span><span class="control-val" id="fcScaleVal">—</span></div>
+              <input type="range" id="fcReleaseScale" min="50" max="200" step="5" value="100" />
+              <div class="subtle">Scale the observed source hydrograph to test a larger or smaller release.</div>
+            </div>
+          </div>
+
+          <div class="forecast-chart-wrap"><canvas id="forecastCanvas"></canvas></div>
+
+          <div class="results-section-title">Daily volumetric accounting
+            <span class="subtle" style="font-weight:400;font-size:0.76rem;color:var(--color-text-muted)" id="fcArrivalHead"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Date</th><th class="num">Dam release (AF)</th><th class="num">Arrival at target (AF)</th>
+                  <th class="num">River loss (AF)</th><th class="num">Cumulative loss (AF)</th><th class="num">Recovery</th>
+                </tr>
+              </thead>
+              <tbody id="forecastDailyBody"></tbody>
+            </table>
+          </div>
+
+          <div class="results-section-title">Routing notes</div>
+          <div id="forecastNotes"></div>
+        </div>
+      </div>
+
       <!-- Methodology -->
       <div class="card" id="cardMethodology">
         <details class="method-doc">
@@ -491,6 +613,7 @@
             <p><strong>Volume.</strong> Trapezoidal integration per reading interval: <code>AF = Q (cfs) × Δt (s) / 43,560</code>; 1 cfs for 24 h = 1.98347 AF. Direct storm volume uses <code>max(0, Q − baseline)</code>; total volume uses raw Q.</p>
             <p><strong>Baselines.</strong> Diurnal: average flow by time-of-day bucket over N prior days, projected across the event. Flat: mean of all readings in a configurable pre-event window. Linear ramp: mean of the last hours before start to mean of the first hours after end. None: zero baseline (ephemeral). Manual: fixed cfs value.</p>
             <p><strong>Travel time.</strong> (1) <em>First rise</em> (leading edge): each gage's first <em>sustained</em> rise above 2% of its peak excess (baseline-removed flow), linearly interpolated between readings and filtered so single-reading noise spikes don't count. Difference between upstream and downstream rise instants = the operational warning/lead time — when the release first begins to show downstream, ahead of the crest. If a gage is already above threshold when the window opens, its rise is flagged "already elevated at window start." (2) <em>Peak-to-peak</em>: event-window crest time difference — when the peak itself arrives. (3) <em>Cross-correlation</em>: best lag maximizing similarity between the two normalized excess hydrographs (search up to the configured max, on a uniform grid at the finer of the two gage intervals). <em>Centroid delay</em> — the volume-weighted center of mass of the excess hydrograph, i.e. the instant half the routed volume has passed — is still computed as an internal cross-check and exported to CSV, but is omitted from the operations view because it reflects average mass transit, not actionable arrival times. Wave speed uses straight-line gage separation (HAVERSINE) against the first positive of peak-to-peak → cross-correlation → centroid — actual river distance is longer, so treat speeds as upper bounds.</p>
+            <p><strong>Downstream arrival forecast.</strong> Calibrated from the event: initial abstraction <code>I<sub>a</sub></code> is the source direct volume released before the downstream first rise; conveyance efficiency <code>C<sub>eff</sub> = V<sub>arrived</sub> / (V<sub>released</sub> − I<sub>a</sub>)</code>; front lag is downstream minus upstream first rise; crest lag is downstream minus upstream peak time; peak attenuation <code>α</code> is downstream peak excess ÷ upstream peak excess; recession decay <code>k</code> is fitted log-linearly to the downstream falling limb. The proposed source hydrograph is time-warped (source first rise→front arrival, source peak→crest arrival), attenuated by α, smoothed with a Gaussian kernel (<code>σ = clamp(0.15/k, 2, 12) h</code>), given an exponential bank-storage tail, and normalized numerically so the hourly series integrates to <code>V<sub>Dome</sub> = max(0, C<sub>eff</sub> × (V<sub>proposed</sub> − I<sub>a</sub>) × Φ<sub>seasonality</sub> × Φ<sub>antecedent</sub>)</code>. Tuning changes only affect the forecast, never the observed-event results in Step 3 or the baseline calibration in Step 5.</p>
             <p><strong>Gap fills &amp; bias.</strong> Linear interpolation is the neutral default. <em>Hold last</em> biases volume slightly high during recession gaps; <em>fill with zero</em> biases low; <em>scale from upstream</em> transfers the adjacent upstream gage's flow scaled by the drainage-area ratio (only when both areas are published) — best for instrument outages. Unfilled gaps are excluded from integration and flagged; the excluded share of the event window is reported in the data-quality column.</p>
             <p><strong>Timezone.</strong> Dialogs and chart axis show your browser's local timezone; underlying data are UTC instants from USGS.</p>
           </div>

@@ -41,6 +41,7 @@ let eventEnd = null;            // Date|null
 let volumeBasis = 'direct';     // 'direct' | 'total'
 let chart = null;               // main overlay Chart
 let barChart = null;            // results bar Chart
+let forecastChart = null;       // downstream arrival forecast line Chart
 
 /* ---------- Small utilities ---------- */
 function esc(s) {

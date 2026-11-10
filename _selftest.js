@@ -154,6 +154,31 @@ const riseDelay = dn.results.riseTimeMs - up.results.riseTimeMs;
 assert(Math.abs(pair.riseDelayMs - shift) < 200e3, 'first-rise delay ~3h, got ' + (pair.riseDelayMs / 60000).toFixed(2) + ' min');
 assert(pair.riseDelayMs === riseDelay, 'pair riseDelayMs matches per-gage rise instants');
 
+// downstream arrival forecast calibration + numerical volume closure
+calibrateForecastModel();
+assert(CalibrationModel.calibrated, 'forecast calibrated: ' + CalibrationModel.calibrationSource);
+assert(CalibrationModel.conveyanceEfficiency > 0 && CalibrationModel.conveyanceEfficiency <= 0.95,
+  'Ceff inside 0-95%, got ' + CalibrationModel.conveyanceEfficiency);
+assert(Math.abs(CalibrationModel.frontLagHours - 3) < 0.5, 'front lag ~3h, got ' + CalibrationModel.frontLagHours.toFixed(2));
+assert(Math.abs(CalibrationModel.crestLagHours - 3) < 0.01, 'crest lag ~3h, got ' + CalibrationModel.crestLagHours.toFixed(2));
+assert(CalibrationModel.peakAttenuationRatio > 0.9 && CalibrationModel.peakAttenuationRatio < 1.0,
+  'peak attenuation ~0.94, got ' + CalibrationModel.peakAttenuationRatio.toFixed(3));
+const sched = buildForecastSchedule();
+assert(sched.length > 10, 'forecast source schedule built, got ' + sched.length + ' hourly points');
+const fc = computeArrivalForecast(sched, CalibrationModel.tuning);
+assert(fc && fc.hourly.length > 2, 'arrival forecast hourly series built');
+assert(fc.daily.length >= 1, 'arrival forecast daily accounting built');
+const fsum = fc.summary;
+const fcTargetAF = fsum.conveyanceEfficiency * Math.max(0, fsum.totalReleaseAF - fsum.initialAbstractionAF) *
+  fsum.seasonalityETFactor * fsum.antecedentMoistureFactor;
+assert(Math.abs(fsum.totalArrivedAF - fcTargetAF) < 0.5,
+  'forecast volume closure: got ' + fsum.totalArrivedAF.toFixed(2) + ', target ' + fcTargetAF.toFixed(2));
+assert(fsum.peakArrivingCfs > 0 && fsum.peakArrivalMs != null, 'forecast peak arrival present');
+assert(fsum.frontArrivalMs != null, 'forecast first-water arrival present');
+const hLast = fc.hourly[fc.hourly.length - 1];
+assert(Math.abs(hLast.cumArrivingAF - fsum.totalArrivedAF) < 0.01, 'cumulative arrival closes the hourly grid');
+assert(Math.abs(fc.daily.reduce((a, d) => a + d.arrivingAF, 0) - fsum.totalArrivedAF) < 0.5, 'daily arrival sums to forecast total');
+
 // flat baseline path (24h of constant-50 pre data -> flat = 50 = manual)
 up.baseline.method = 'flat'; up.baseline.flatHours = 24;
 assert(buildBaselineRef(up, eventStart.getTime(), eventEnd.getTime()) && up.blCache.type === 'flat', 'flat baseline built');
