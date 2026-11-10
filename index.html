@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>USACE Release Analysis — Multi-Gage Storm Comparison</title>
+    <meta name="description" content="Compares storm release volumes and travel times across two or more USGS stream gages on the same river, with missing-data gap detection and fill options." />
+    <meta property="og:title" content="USACE Release Analysis" />
+    <meta property="og:description" content="Multi-gage USGS flood-wave volume comparison, travel time estimation, and gap-aware hydrograph analysis." />
+    <meta property="og:type" content="website" />
+
+    <!-- Required CDN Libraries loaded exclusively from cdnjs.cloudflare.com -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.30.1/moment.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
+
+    <style>
+      :root {
+        --color-bg: #f8fafc;
+        --color-surface: #ffffff;
+        --color-border: #e2e8f0;
+        --color-text-main: #0f172a;
+        --color-text-muted: #64748b;
+        --color-primary: #0284c7;
+        --color-primary-hover: #0369a1;
+        --color-primary-light: #e0f2fe;
+        --color-baseline: #d97706;
+        --color-fillmark: #ea580c;
+        --color-start: #2563eb;
+        --color-end: #dc2626;
+        --radius: 8px;
+        --shadow-sm: 0 1px 3px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.06);
+        --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.08), 0 2px 4px -2px rgba(0,0,0,0.05);
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        background-color: var(--color-bg);
+        color: var(--color-text-main);
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+        padding-bottom: 80px;
+      }
+
+      .tabular-nums { font-variant-numeric: tabular-nums; }
+
+      header {
+        background-color: var(--color-surface);
+        border-bottom: 1px solid var(--color-border);
+        padding: 14px 24px;
+        position: sticky; top: 0; z-index: 50;
+      }
+      .header-container {
+        max-width: 1400px; margin: 0 auto;
+        display: flex; justify-content: space-between; align-items: center; gap: 24px;
+      }
+      .brand { display: flex; align-items: center; gap: 12px; }
+      .brand-dot {
+        width: 34px; height: 34px; border-radius: 8px;
+        background: linear-gradient(135deg, #0284c7, #0369a1);
+        color: #fff; display: flex; align-items: center; justify-content: center;
+        font-weight: 800; font-size: 0.8rem; letter-spacing: 0.03em;
+      }
+      .brand-title { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; white-space: nowrap; }
+      .brand-tag {
+        font-size: 0.72rem; font-weight: 500; color: var(--color-text-muted);
+        background-color: #f1f5f9; padding: 2px 8px; border-radius: 4px;
+        border: 1px solid var(--color-border); white-space: nowrap;
+      }
+      .brand-sub { font-size: 0.72rem; color: var(--color-text-muted); }
+
+      .main-container {
+        max-width: 1400px; margin: 24px auto; padding: 0 24px;
+        display: flex; flex-direction: column; gap: 24px;
+      }
+
+      .card {
+        background-color: var(--color-surface);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius);
+        padding: 24px;
+        box-shadow: var(--shadow-sm);
+      }
+      .card-header {
+        display: flex; justify-content: space-between; align-items: flex-start;
+        margin-bottom: 18px; gap: 16px; flex-wrap: wrap;
+      }
+      .step-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 26px; height: 26px; border-radius: 6px; padding: 0 7px;
+        background: var(--color-primary-light); color: var(--color-primary-hover);
+        font-size: 0.8rem; font-weight: 700; margin-right: 10px;
+      }
+      .card-title { font-size: 1.02rem; font-weight: 700; display: flex; align-items: center; }
+      .card-desc { font-size: 0.85rem; color: var(--color-text-muted); margin-top: 3px; max-width: 860px; }
+      .card-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+      input, select { font-family: inherit; }
+      .input, .select-input {
+        height: 38px; border: 1px solid var(--color-border); border-radius: 6px;
+        padding: 0 10px; font-size: 0.88rem; color: var(--color-text-main);
+        background-color: #fff; outline: none; transition: border-color 0.15s;
+      }
+      .input:focus, .select-input:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px rgba(2,132,199,0.12); }
+      .select-input { padding-right: 28px; }
+      .input-sm { height: 30px; font-size: 0.82rem; padding: 0 8px; }
+      .select-input-sm { height: 30px; font-size: 0.8rem; padding: 0 22px 0 8px; }
+      .label {
+        display: block; font-size: 0.72rem; font-weight: 600; color: var(--color-text-muted);
+        text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 5px;
+      }
+
+      .btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+        height: 38px; padding: 0 16px; border-radius: 6px; border: 1px solid transparent;
+        font-size: 0.88rem; font-weight: 600; cursor: pointer; transition: all 0.15s; white-space: nowrap;
+      }
+      .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .btn-primary { background-color: var(--color-primary); color: #fff; }
+      .btn-primary:hover:not(:disabled) { background-color: var(--color-primary-hover); }
+      .btn-ghost { background-color: #fff; color: var(--color-text-main); border-color: var(--color-border); }
+      .btn-ghost:hover:not(:disabled) { background-color: #f8fafc; border-color: #cbd5e1; }
+      .btn-danger-ghost { background-color: #fff; color: var(--color-end); border-color: #fecaca; }
+      .btn-danger-ghost:hover:not(:disabled) { background-color: #fef2f2; }
+      .btn-sm { height: 30px; padding: 0 11px; font-size: 0.78rem; border-radius: 5px; }
+      .spinner {
+        display: none; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.35);
+        border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .form-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; }
+      .form-item { display: flex; flex-direction: column; }
+
+      /* Gage rows (Step 1) */
+      .gage-row {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 12px; border: 1px solid var(--color-border);
+        border-radius: 6px; background-color: #fff; margin-bottom: 8px;
+      }
+      .gage-order {
+        flex: 0 0 34px; height: 30px; display: flex; align-items: center; justify-content: center;
+        background: #f1f5f9; border: 1px solid var(--color-border);
+        border-radius: 6px; font-size: 0.78rem; font-weight: 700; color: var(--color-text-muted);
+      }
+      .gage-row .input.g-label { width: 190px; }
+      .gage-row .input.g-id { flex: 1 1 200px; min-width: 140px; }
+      .gage-row-arrow {
+        width: 30px; height: 30px; border: 1px solid var(--color-border); background: #fff;
+        border-radius: 5px; cursor: pointer; font-size: 0.85rem; color: var(--color-text-muted);
+      }
+      .gage-row-arrow:hover:not(:disabled) { background: #f1f5f9; color: var(--color-text-main); }
+      .gage-row-arrow:disabled { opacity: 0.35; cursor: not-allowed; }
+      .gage-del {
+        width: 30px; height: 30px; border: 1px solid #fecaca; background: #fff; color: var(--color-end);
+        border-radius: 5px; cursor: pointer; font-size: 0.9rem; line-height: 1;
+      }
+      .gage-del:hover { background: #fef2f2; }
+
+      .status-box {
+        display: none; margin-top: 14px; padding: 11px 14px; border-radius: 6px;
+        font-size: 0.85rem; border: 1px solid; line-height: 1.55;
+      }
+      .status-box.info { display: block; background: #f0f9ff; border-color: #bae6fd; color: #075985; }
+      .status-box.success { display: block; background: #f0fdf4; border-color: #86efac; color: #166534; }
+      .status-box.error { display: block; background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+      .status-box strong { font-weight: 700; }
+
+      /* Chart */
+      .chart-wrap { position: relative; height: 430px; }
+      .chart-foot {
+        margin-top: 10px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+        font-size: 0.76rem; color: var(--color-text-muted);
+      }
+      .legend-chips { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 0.78rem; }
+      .chip { display: inline-flex; align-items: center; gap: 6px; }
+      .chip .swatch { width: 18px; height: 4px; border-radius: 2px; display: inline-block; }
+      .chip .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+      .chip .band { width: 16px; height: 12px; border-radius: 2px; display: inline-block; }
+
+      .hint-doc { font-size: 0.78rem; color: var(--color-text-muted); margin-top: 10px; }
+
+      /* Per-gage baseline panels */
+      .gage-panel {
+        border: 1px solid var(--color-border); border-left: 4px solid var(--gc, #0284c7);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 10px; background: #fff;
+      }
+      .gage-panel-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+      .gage-panel-title { font-weight: 700; font-size: 0.9rem; }
+      .gage-panel-sub { font-size: 0.76rem; color: var(--color-text-muted); }
+      .gage-panel-body { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      .param-wrap { display: flex; align-items: center; gap: 8px; }
+      .param-wrap input { width: 90px; }
+      .param-wrap .unit { font-size: 0.75rem; color: var(--color-text-muted); }
+      .panel-warnings { margin-top: 8px; }
+
+      .warn-list { list-style: none; margin: 0; padding: 0; }
+      .warn-list li { font-size: 0.78rem; color: #92400e; background: #fffbeb; border: 1px solid #fde68a;
+        border-radius: 5px; padding: 6px 9px; margin-top: 5px; }
+      .warn-list li.ok { color: #166534; background: #f0fdf4; border-color: #86efac; }
+
+      /* Gages in Missing Data card */
+      .gap-block { border: 1px solid var(--color-border); border-left: 4px solid var(--gc, #0284c7);
+        border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; background: #fff; }
+      .gap-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+      .gap-stat { font-size: 0.78rem; color: var(--color-text-muted); }
+      .badge {
+        display: inline-block; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.04em;
+        padding: 2px 7px; border-radius: 10px; text-transform: uppercase;
+      }
+      .badge-event { background: #fee2e2; color: #991b1b; }
+      badge-pre-event { }
+      .badge-pre { background: #f1f5f9; color: var(--color-text-muted); }
+      .badge-filled { background: #ffedd5; color: #c2410c; }
+      .badge-none { background: #fef2f2; color: #991b1b; }
+
+      table.data-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+      table.data-table th {
+        text-align: left; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--color-text-muted); padding: 6px 8px; border-bottom: 2px solid var(--color-border);
+        white-space: nowrap;
+      }
+      table.data-table td { padding: 7px 8px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+      table.data-table td.num, table.data-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+      table.data-table tr:last-child td { border-bottom: none; }
+      table.data-table .subtle { color: var(--color-text-muted); font-size: 0.74rem; }
+      table.data-table tr.total-row td { background: #f8fafc; font-weight: 600; }
+      .table-wrap { overflow-x: auto; }
+      .tag-pill { font-size: 0.66rem; font-weight: 700; padding: 2px 7px; border-radius: 9px; white-space: nowrap; }
+      .tag-loss { background: #fef2f2; color: #991b1b; }
+      .tag-gain { background: #f0fdf4; color: #166534; }
+      .tag-even { background: #f8fafc; color: var(--color-text-muted); }
+      .tag-gap { background: #fff7ed; color: #c2410c; }
+      .tag-ok { background: #f0fdf4; color: #166534; }
+
+      /* Results */
+      .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
+      .kpi {
+        border: 1px solid var(--color-border); border-radius: 8px; padding: 12px 14px; background: #fbfdff;
+      }
+      .kpi .kpi-label { font-size: 0.68rem; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+      .kpi .kpi-value { font-size: 1.25rem; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
+      .kpi .kpi-sub { font-size: 0.72rem; color: var(--color-text-muted); margin-top: 2px; }
+
+      .basis-toggle { display: inline-flex; border: 1px solid var(--color-border); border-radius: 6px; overflow: hidden; }
+      .basis-toggle label {
+        padding: 7px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+        color: var(--color-text-muted); background: #fff; user-select: none;
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .basis-toggle label.on { background: var(--color-primary); color: #fff; }
+      .basis-toggle input { display: none; }
+
+      .bar-wrap { position: relative; height: 300px; margin-top: 20px; }
+      .results-section-title { font-size: 0.88rem; font-weight: 700; margin: 22px 0 10px; display: flex; align-items: center; gap: 8px; }
+      .results-empty {
+        border: 1px dashed var(--color-border); border-radius: 8px; padding: 30px 20px;
+        text-align: center; color: var(--color-text-muted); font-size: 0.85rem; background: #fbfdff;
+      }
+
+      .footnote { font-size: 0.76rem; color: var(--color-text-muted); margin-top: 16px; line-height: 1.6; }
+      details.method-doc { margin-top: 10px; border: 1px solid var(--color-border); border-radius: 8px; padding: 0; background: #fff; }
+      details.method-doc summary { cursor: pointer; font-size: 0.85rem; font-weight: 700; padding: 12px 16px; color: var(--color-primary-hover); }
+      details.method-doc .doc-body { padding: 4px 18px 16px; font-size: 0.8rem; color: #334155; line-height: 1.65; }
+      details.method-doc ul, details.method-doc ol { padding-left: 20px; margin: 6px 0; }
+      details.method-doc code { background: #f1f5f9; border-radius: 4px; padding: 1px 5px; font-size: 0.76rem; }
+
+      /* Card display order — operational flow:
+         gages → plot → results → baselines → missing data → methodology */
+      #cardResults { order: 3; }
+      #cardBaselines { order: 4; }
+      #cardMissingData { order: 5; }
+      #cardMethodology { order: 6; }
+
+      /* Collapsible Missing Data card */
+      .collapse-btn {
+        width: 24px; height: 21px; margin-left: 8px;
+        border: 1px solid var(--color-border); background: #fff; color: var(--color-text-muted);
+        border-radius: 5px; cursor: pointer; font-size: 0.72rem; line-height: 1;
+        display: inline-flex; align-items: center; justify-content: center;
+        transition: transform 0.15s;
+      }
+      .collapse-btn:hover { background: #f1f5f9; color: var(--color-text-main); }
+      .card.collapsed .collapse-btn { transform: rotate(-90deg); }
+      #cardMissingData.collapsed .card-desc,
+      #cardMissingData.collapsed .card-actions,
+      #cardMissingData.collapsed #gapsContainer { display: none; }
+      #gapsSummary { font-weight: 500; color: var(--color-text-muted); font-size: 0.76rem; margin-left: 10px; }
+
+      @media (max-width: 760px) {
+        .gage-row .input.g-label { width: 120px; }
+        .chart-wrap { height: 340px; }
+        .main-container { padding: 0 12px; }
+        .card { padding: 16px; }
+      }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <div class="header-container">
+        <div class="brand">
+          <div class="brand-dot">URA</div>
+          <div>
+            <div class="brand-title">USACE Release Analysis</div>
+            <div class="brand-sub">Flood-wave volume &amp; travel-time comparison across multiple USGS stream gages</div>
+          </div>
+        </div>
+        <div class="brand-tag">USGS Continuous (Instantaneous) Discharge · Parameter 00060</div>
+      </div>
+    </header>
+
+    <div class="main-container">
+
+      <!-- STEP 1: GAGE SETUP + LOAD -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title"><span class="step-badge">1</span>List Gages (upstream → downstream)</h2>
+            <p class="card-desc">Enter each gage ID in order, the most upstream gage first — the first row is the reference for volume ratios and travel times. All gages are queried over the same date window from the USGS Water Data OGC API (continuous instantaneous discharge, parameter 00060).</p>
+          </div>
+        </div>
+
+        <div id="gageRows"></div>
+
+        <div class="form-row" style="margin-top: 6px;">
+          <button class="btn btn-ghost btn-sm" id="btnAddGage">+ Add Downstream Gage</button>
+          <span class="subtle" style="font-size:0.78rem; color: var(--color-text-muted);">Up to 6 gages (same river reach). Order matters — drag is not needed; use the arrows.</span>
+        </div>
+
+        <div class="form-row" style="margin-top: 18px;">
+          <div class="form-item">
+            <label class="label" for="startDateInput">Data window start (local time)</label>
+            <input class="input" type="datetime-local" id="startDateInput" />
+          </div>
+          <div class="form-item">
+            <label class="label" for="endDateInput">Data window end (local time)</label>
+            <input class="input" type="datetime-local" id="endDateInput" />
+          </div>
+          <div class="form-item" style="flex: 1 1 auto; justify-content: flex-end;">
+            <div class="card-actions">
+              <div class="spinner" id="loadBtnSpinner"></div>
+              <button class="btn btn-primary" id="btnLoad"><span id="loadBtnText">Load Gage Data ▶</span></button>
+              <button class="btn btn-ghost" id="btnSaveConfig" title="Save the gages, time window, event window, baselines, gap fills, volume basis and lag settings to a JSON file">💾 Save Config</button>
+              <button class="btn btn-ghost" id="btnLoadConfig" title="Restore a saved configuration JSON — re-fetches the gages and re-applies every setting">📁 Load Config</button>
+              <input type="file" id="configFileInput" accept=".json,application/json" style="display:none" />
+            </div>
+          </div>
+        </div>
+        <div class="hint-doc">Tip: 5-minute gages produce ~288 records/day. Windows up to ~30 days load comfortably; the fetcher auto-paginates (10,000 records per page, up to 10 pages per gage).</div>
+
+        <div class="status-box" id="statusBox" role="status"></div>
+      </div>
+
+      <!-- STEP 2: EVENT SELECTION -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title"><span class="step-badge">2</span>Select Storm Release Window</h2>
+            <p class="card-desc">Click once on the chart to mark the event start (when the release/wave begins at the most upstream gage), then click again to mark the end. The same window is applied to every gage. Volumes are computed only inside this window.</p>
+          </div>
+          <div class="card-actions">
+            <button class="btn btn-ghost btn-sm" id="btnAutoDetect" disabled>✦ Suggest Largest Event</button>
+            <button class="btn btn-ghost btn-sm" id="btnClearSel" disabled>Clear Selection</button>
+          </div>
+        </div>
+
+        <div class="status-box info" id="selStatus" style="margin: 0 0 12px;">Load gage data above, then click two points on the chart to define the storm start and end.</div>
+
+        <div class="chart-wrap">
+          <canvas id="hydrographCanvas"></canvas>
+        </div>
+        <div class="chart-foot">
+          <div class="legend-chips" id="legendChips"></div>
+          <div style="flex:1"></div>
+          <span style="display:inline-flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="chkShowGaps" checked /> <span style="font-size:0.78rem;">Highlight gaps on chart</span>
+          </span>
+          <span style="display:inline-flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="chkOnlyEvent" checked /> <span style="font-size:0.78rem;">Event-window gaps only</span>
+          </span>
+        </div>
+      </div>
+
+      <!-- BASELINES (Step 4 — displayed after results via CSS order) -->
+      <div class="card" id="cardBaselines">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title"><span class="step-badge">4</span>Baseline Separation (per gage)</h2>
+            <p class="card-desc">Each gage gets its own baseflow construction — pick <em>Diurnal</em> for wastewater/pumping-influenced flows, <em>Flat</em> for steady natural baseflow, <em>Linear Ramp</em> when baseflow differs before vs after the event, or <em>None/Dry</em> for ephemeral reaches that normally carry no flow. Direct storm volume = observed flow minus baseline, floored at zero.</p>
+          </div>
+        </div>
+        <div id="baselinesContainer">
+          <div class="results-empty">Load gage data in Step 1 to configure baselines.</div>
+        </div>
+      </div>
+
+      <!-- MISSING DATA (Step 5 — displayed last, collapsible) -->
+      <div class="card" id="cardMissingData">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title"><span class="step-badge">5</span>Missing Data (gaps) &amp; Fills
+              <span id="gapsSummary" style="display:none;"></span>
+              <button class="collapse-btn" id="btnGapsCollapse" title="Collapse / expand this card" aria-label="Collapse or expand the Missing Data card">▾</button>
+            </h2>
+            <p class="card-desc">Gaps larger than 1.5 × the gage's sampling interval are detected automatically and shaded on the chart in each gage's color. Gaps inside the event window are flagged <span class="badge badge-event">event</span>. Choose how each gap should be handled — every decision is applied instantly and colored on the chart.</p>
+          </div>
+          <div class="card-actions">
+            <button class="btn btn-ghost btn-sm" id="btnFillAllLinear" disabled>Fill ALL gaps (linear)</button>
+            <button class="btn btn-ghost btn-sm" id="btnFillAllUpstream" disabled>Fill ALL gaps (from upstream)</button>
+            <button class="btn btn-danger-ghost btn-sm" id="btnClearAllFills" disabled>Reset all fills</button>
+          </div>
+        </div>
+        <div id="gapsContainer">
+          <div class="results-empty">Load gage data in Step 1 to audit gaps.</div>
+        </div>
+      </div>
+
+      <!-- RESULTS (Step 3 — displayed right after the plot via CSS order) -->
+      <div class="card" id="cardResults">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title"><span class="step-badge">3</span>Volume &amp; Travel-Time Comparison</h2>
+            <p class="card-desc">Volumes integrate each gage's readings across the event window (1 cfs-day = 1.98347 acre-feet). Ratios compare each gage against the most upstream one; travel times are estimated three independent ways. The bar chart always shows direct storm volume, with acre-feet printed in each bar.</p>
+          </div>
+          <div class="card-actions">
+            <div class="basis-toggle">
+              <label class="on" id="lblBasisDirect"><input type="radio" name="basis" id="rBasisDirect" checked value="direct" /> Direct storm volume</label>
+              <label id="lblBasisTotal"><input type="radio" name="basis" id="rBasisTotal" value="total" /> Total above zero</label>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btnExportReport" disabled>⬇ Export Report (HTML)</button>
+            <button class="btn btn-ghost btn-sm" id="btnExportCSV" disabled>⬇ Export CSV</button>
+          </div>
+        </div>
+
+        <div id="resultsEmpty" class="results-empty">
+          Load gage data (Step 1) and select a storm release window (Step 2) to compute volumes and travel times.
+        </div>
+
+        <div id="resultsContent" style="display:none;">
+          <div class="kpi-grid" id="kpiGrid"></div>
+
+          <div class="results-section-title">Volume comparison <span class="subtle" style="font-weight:400;font-size:0.76rem;color:var(--color-text-muted)">— event window</span></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Gage</th><th class="num">Drainage area (mi²)</th><th class="num">Peak (cfs)</th><th>Peak time</th>
+                  <th>First rise (local)</th>
+                  <th class="num">Direct storm vol (AF)</th><th class="num">Total vol (AF)</th>
+                  <th class="num">% of upstream</th><th class="num">Δ vs upstream</th><th>Δ interpretation</th><th>Data quality</th>
+                </tr>
+              </thead>
+              <tbody id="volumesBody"></tbody>
+            </table>
+          </div>
+
+          <div class="results-section-title">Travel time between gages
+            <span class="subtle" style="font-weight:400;font-size:0.76rem;color:var(--color-text-muted)">
+              — search lag up to <input class="input input-sm tabular-nums" type="number" id="lagHours" value="24" min="1" max="240" style="width:64px;" /> hr
+            </span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Reach (upstream → downstream)</th><th class="num">First-rise delay</th>
+                  <th class="num">Peak-to-peak delay</th><th class="num">Cross-correlation lag (r)</th>
+                  <th class="num">Gage distance (mi)</th><th class="num">Wave speed</th>
+                </tr>
+              </thead>
+              <tbody id="travelBody"></tbody>
+            </table>
+          </div>
+
+          <div class="bar-wrap"><canvas id="barCanvas"></canvas></div>
+
+          <div class="results-section-title">Diagnostics &amp; warnings</div>
+          <div id="warningsContainer"><ul class="warn-list"></ul></div>
+        </div>
+      </div>
+
+      <!-- Methodology -->
+      <div class="card" id="cardMethodology">
+        <details class="method-doc">
+          <summary>Data sources, formulas &amp; method notes</summary>
+          <div class="doc-body">
+            <p><strong>Data source.</strong> USGS Water Data OGC API — <code>GET api.waterdata.usgs.gov/ogcapi/v0/collections/continuous/items?monitoring_location_id=USGS-nnnnnnnn&amp;parameter_code=00060&amp;datetime=START/END</code>, auto-paginating through <code>rel="next"</code> cursor links. Site metadata (name, drainage area, coordinates) from <code>collections/monitoring-locations/items</code>. Values are instantaneous discharge in ft³/s; provisional data may change after review.</p>
+            <p><strong>Volume.</strong> Trapezoidal integration per reading interval: <code>AF = Q (cfs) × Δt (s) / 43,560</code>; 1 cfs for 24 h = 1.98347 AF. Direct storm volume uses <code>max(0, Q − baseline)</code>; total volume uses raw Q.</p>
+            <p><strong>Baselines.</strong> Diurnal: average flow by time-of-day bucket over N prior days, projected across the event. Flat: mean of all readings in a configurable pre-event window. Linear ramp: mean of the last hours before start to mean of the first hours after end. None: zero baseline (ephemeral). Manual: fixed cfs value.</p>
+            <p><strong>Travel time.</strong> (1) <em>First rise</em> (leading edge): each gage's first <em>sustained</em> rise above 2% of its peak excess (baseline-removed flow), linearly interpolated between readings and filtered so single-reading noise spikes don't count. Difference between upstream and downstream rise instants = the operational warning/lead time — when the release first begins to show downstream, ahead of the crest. If a gage is already above threshold when the window opens, its rise is flagged "already elevated at window start." (2) <em>Peak-to-peak</em>: event-window crest time difference — when the peak itself arrives. (3) <em>Cross-correlation</em>: best lag maximizing similarity between the two normalized excess hydrographs (search up to the configured max, on a uniform grid at the finer of the two gage intervals). <em>Centroid delay</em> — the volume-weighted center of mass of the excess hydrograph, i.e. the instant half the routed volume has passed — is still computed as an internal cross-check and exported to CSV, but is omitted from the operations view because it reflects average mass transit, not actionable arrival times. Wave speed uses straight-line gage separation (HAVERSINE) against the first positive of peak-to-peak → cross-correlation → centroid — actual river distance is longer, so treat speeds as upper bounds.</p>
+            <p><strong>Gap fills &amp; bias.</strong> Linear interpolation is the neutral default. <em>Hold last</em> biases volume slightly high during recession gaps; <em>fill with zero</em> biases low; <em>scale from upstream</em> transfers the adjacent upstream gage's flow scaled by the drainage-area ratio (only when both areas are published) — best for instrument outages. Unfilled gaps are excluded from integration and flagged; the excluded share of the event window is reported in the data-quality column.</p>
+            <p><strong>Timezone.</strong> Dialogs and chart axis show your browser's local timezone; underlying data are UTC instants from USGS.</p>
+          </div>
+        </details>
+        <div class="footnote">Not for design or permitting decisions without independent verification. Provisional USGS data are subject to revision.</div>
+      </div>
+
+    </div><!-- /main-container -->
+
+    <script src="usace-data.js"></script>
+    <script src="usace-analysis.js"></script>
+    <script src="usace-ui.js"></script>
+  </body>
+</html>

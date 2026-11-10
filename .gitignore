@@ -1,0 +1,22 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# Node (the app and tests are zero-dependency, this is just future-proofing)
+node_modules/
+npm-debug.log*
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Local environment secrets
+.env
+.env.*
+
+# Generated analysis exports
+usace-release-report-*.html
+usace-release-*.csv
