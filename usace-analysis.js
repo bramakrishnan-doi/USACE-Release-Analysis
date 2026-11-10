@@ -13,6 +13,22 @@ let lastForecast = null;    // most recent routed arrival forecast (UI + CSV + r
 let forecastSourceId = null;
 let forecastTargetId = null;
 
+/* Release scenario for the arrival forecast.  The observed source
+   hydrograph can be replaced by an explicit operational schedule.
+   Schedule points are change times; each flow holds until the next
+   point, and the release ends at the final point. */
+const ReleaseScenario = {
+  mode: 'observed',        // 'observed' | 'custom'
+  points: [],              // [{ t: ms, v: cfs }]
+  timeZone: 'MST'          // 'MST' | 'LOCAL' | 'UTC'
+};
+
+const FORECAST_TIMEZONES = {
+  MST: { label: 'MST — Arizona (UTC−7)', abbr: 'MST', offsetMs: -7 * 3600e3 },
+  LOCAL: { label: 'Browser local time', abbr: 'local', offsetMs: null },
+  UTC: { label: 'UTC', abbr: 'UTC', offsetMs: 0 }
+};
+
 /* ============================================================
    Baseline reference construction (per gage)
    Mirrors the proven Storm-Event methods, generalized to work
@@ -594,26 +610,89 @@ function fcMonthAbbr(m) {
   return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m] || '';
 }
 
+/* ---------- Forecast timezone helpers ----------
+   All stored instants are UTC milliseconds.  The forecast card can
+   display and interpret schedules in a fixed MST (Arizona, UTC−7),
+   the browser's local timezone, or UTC.  Observed-data cards remain
+   browser-local; this only affects the forecast card. */
+function fcTimeZone() {
+  return FORECAST_TIMEZONES[ReleaseScenario.timeZone] || FORECAST_TIMEZONES.MST;
+}
+
+function fcZoneAbbr() {
+  return fcTimeZone().abbr;
+}
+
+function fcZoneOffsetMs(ms) {
+  const z = fcTimeZone();
+  if (z.offsetMs != null) return z.offsetMs;
+  return -new Date(Number(ms)).getTimezoneOffset() * 60000;
+}
+
+function fcLocalOffsetMs(ms) {
+  return -new Date(Number(ms)).getTimezoneOffset() * 60000;
+}
+
+/* Components as they appear on a clock in the selected forecast timezone. */
+function fcZonedParts(ms) {
+  const d = new Date(Number(ms) + fcZoneOffsetMs(ms));
+  return {
+    y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate(),
+    h: d.getUTCHours(), min: d.getUTCMinutes(), dow: d.getUTCDay()
+  };
+}
+
+/* Clock components in the selected forecast timezone -> UTC ms. */
+function fcPartsToMs(y, m, d, h, min) {
+  if (ReleaseScenario.timeZone === 'LOCAL') {
+    return new Date(y, m - 1, d, h, min || 0, 0, 0).getTime();
+  }
+  const offset = fcTimeZone().offsetMs != null ? fcTimeZone().offsetMs : 0;
+  return Date.UTC(y, m - 1, d, h, min || 0, 0, 0) - offset;
+}
+
+/* How far to shift timestamps on the chart's time axis so local-axis
+   tick labels show the forecast timezone.  The shift is zero when the
+   selected zone matches the browser. */
+function fcChartShiftMs(ms) {
+  return fcZoneOffsetMs(ms) - fcLocalOffsetMs(ms);
+}
+
 function fcDateTimeLocal(ms) {
   if (ms == null || !Number.isFinite(Number(ms))) return '—';
-  const d = new Date(Number(ms));
-  return fcMonthAbbr(d.getMonth()) + ' ' + d.getDate() + ', ' + d.getFullYear() + ' ' +
-    fcPad2(d.getHours()) + ':' + fcPad2(d.getMinutes());
+  const p = fcZonedParts(ms);
+  return fcMonthAbbr(p.m - 1) + ' ' + p.d + ', ' + p.y + ' ' + fcPad2(p.h) + ':' + fcPad2(p.min);
 }
 
 function fcDateTimeShort(ms) {
-  const d = new Date(ms);
-  return fcMonthAbbr(d.getMonth()) + ' ' + d.getDate() + ' ' + fcPad2(d.getHours()) + ':' + fcPad2(d.getMinutes());
+  if (ms == null || !Number.isFinite(Number(ms))) return '—';
+  const p = fcZonedParts(ms);
+  return fcMonthAbbr(p.m - 1) + ' ' + p.d + ' ' + fcPad2(p.h) + ':' + fcPad2(p.min);
 }
 
 function fcDayKey(ms) {
-  const d = new Date(ms);
-  return d.getFullYear() + '-' + fcPad2(d.getMonth() + 1) + '-' + fcPad2(d.getDate());
+  const p = fcZonedParts(ms);
+  return p.y + '-' + fcPad2(p.m) + '-' + fcPad2(p.d);
 }
 
 function fcDayLabel(ms) {
-  const d = new Date(ms);
-  return fcMonthAbbr(d.getMonth()) + ' ' + d.getDate() + ', ' + d.getFullYear();
+  const p = fcZonedParts(ms);
+  return fcMonthAbbr(p.m - 1) + ' ' + p.d + ', ' + p.y;
+}
+
+/* Value for <input type="datetime-local"> in the forecast timezone. */
+function fcDateTimeInputValue(ms) {
+  if (ms == null || !Number.isFinite(Number(ms))) return '';
+  const p = fcZonedParts(ms);
+  return p.y + '-' + fcPad2(p.m) + '-' + fcPad2(p.d) + 'T' + fcPad2(p.h) + ':' + fcPad2(p.min);
+}
+
+/* Parse a <input type="datetime-local"> value in the forecast timezone. */
+function fcParseDateTimeInput(value) {
+  const m = String(value == null ? '' : value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const ms = fcPartsToMs(Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
+  return Number.isFinite(ms) ? ms : null;
 }
 
 /* Restore the tuning controls to the freshly calibrated values
@@ -855,15 +934,221 @@ function integrateForecastSeries(series) {
   return af;
 }
 
+/* Cumulative release volume (AF) from the start of a piecewise-linear
+   series to an arbitrary instant.  Used so a custom step schedule keeps
+   exact release volumes even though the exported series is hourly. */
+function integrateForecastTo(series, tEnd) {
+  if (!series || series.length < 2 || !(tEnd > series[0].t)) return 0;
+  let af = 0;
+  for (let i = 1; i < series.length; i++) {
+    const a = series[i - 1], b = series[i];
+    if (a.t >= tEnd) break;
+    const e = Math.min(b.t, tEnd);
+    if (!(e > a.t)) continue;
+    const span = b.t - a.t;
+    const qE = span > 0 ? a.v + (b.v - a.v) * ((e - a.t) / span) : a.v;
+    af += (a.v + qE) / 2 * ((e - a.t) / 1000) / 43560;
+    if (b.t >= tEnd) break;
+  }
+  return af;
+}
+
 function valueInForecastSeries(series, t) {
   if (!series || !series.length) return 0;
   if (t < series[0].t || t > series[series.length - 1].t) return 0;
   return interpForecastPoints(series, t);
 }
 
-/* The proposed schedule is the active source hydrograph
-   (baseline-removed), resampled to a uniform hourly grid. */
+/* ---------- Custom release schedule ---------- */
+function normalizeReleasePoints(points) {
+  const arr = (points || [])
+    .map((p) => ({
+      t: Number(p && (p.t != null ? p.t : p.timestamp)),
+      v: Math.max(0, Number(p && (p.v != null ? p.v : p.flow)))
+    }))
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v))
+    .sort((a, b) => a.t - b.t);
+  const out = [];
+  for (const p of arr) {
+    if (out.length && out[out.length - 1].t === p.t) out[out.length - 1].v = p.v;
+    else out.push(p);
+  }
+  return out;
+}
+
+/* Schedule rows are change points; each flow holds until the next row,
+   and the release ends at the final row. */
+function releaseScheduleSummary() {
+  const pts = normalizeReleasePoints(ReleaseScenario.points);
+  if (!pts.length) return null;
+  let peak = 0;
+  for (const p of pts) if (p.v > peak) peak = p.v;
+  let af = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const dtSec = (pts[i].t - pts[i - 1].t) / 1000;
+    if (dtSec > 0) af += pts[i - 1].v * dtSec / 43560;
+  }
+  return {
+    count: pts.length,
+    startMs: pts[0].t,
+    endMs: pts[pts.length - 1].t,
+    peakCfs: peak,
+    totalAF: af,
+    durationHours: (pts[pts.length - 1].t - pts[0].t) / 3600e3,
+    lastFlowCfs: pts[pts.length - 1].v
+  };
+}
+
+/* Build the routing source series from the custom schedule.  Hourly
+   samples plus a near-instant point at each change time preserve the
+   hold/step semantics when the engine interpolates and integrates. */
+function buildCustomReleaseSchedule() {
+  const pts = normalizeReleasePoints(ReleaseScenario.points);
+  if (pts.length < 2) return [];
+  const step = 3600e3;
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (!(b.t > a.t)) continue;
+    if (!out.length) out.push({ t: a.t, v: a.v });
+    let t = Math.ceil((a.t + 1) / step) * step;
+    for (; t < b.t; t += step) out.push({ t: t, v: a.v });
+    if (b.t - 1 > a.t) out.push({ t: b.t - 1, v: a.v });
+    out.push({ t: b.t, v: b.v });
+  }
+  const dedup = [];
+  for (const p of out) {
+    if (dedup.length && dedup[dedup.length - 1].t >= p.t) {
+      if (dedup[dedup.length - 1].t === p.t) dedup[dedup.length - 1].v = p.v;
+      continue;
+    }
+    dedup.push(p);
+  }
+  return dedup;
+}
+
+function fcMonthIndex(name) {
+  const key = String(name || '').toLowerCase().slice(0, 3);
+  return ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(key) + 1;
+}
+
+/* Parse a simple pasted schedule.  Accepted line shapes include:
+     2026-11-10 06:00, 250
+     11/10/2026 6:00 AM 250
+     Tuesday, 10 NOV at 6am MST - 250 cfs
+   Lines with a time and flow but no date inherit the last date seen.
+   Lines without a time (e.g. "maintain 500 cfs") are skipped. */
+function parseReleaseScheduleText(text, defaultYear) {
+  const lines = String(text == null ? '' : text).split(/\r?\n/);
+  const pts = [];
+  const skipped = [];
+  const year = Number(defaultYear) || new Date().getFullYear();
+  let lastDate = null;
+
+  for (let lineNo = 0; lineNo < lines.length; lineNo++) {
+    let line = lines[lineNo].trim();
+    if (!line || /^#/.test(line)) continue;
+    line = line.replace(/[–—]/g, '-').replace(/\s+/g, ' ');
+    let rest = line;
+    let y = null, mo = null, d = null;
+    let m = rest.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+    if (m) {
+      y = Number(m[1]); mo = Number(m[2]); d = Number(m[3]);
+      rest = rest.replace(m[0], ' ');
+    } else {
+      m = rest.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+      if (m) {
+        mo = Number(m[1]); d = Number(m[2]);
+        y = m[3] ? Number(m[3]) : year;
+        if (y < 100) y += 2000;
+        rest = rest.replace(m[0], ' ');
+      } else {
+        m = rest.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:,?\s+(\d{4}))?\b/i);
+        if (!m) {
+          m = rest.match(/\b(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:,?\s+(\d{4}))?\b/i);
+          if (m) {
+            d = Number(m[1]); mo = fcMonthIndex(m[2]); y = m[3] ? Number(m[3]) : year;
+            rest = rest.replace(m[0], ' ');
+          }
+        } else {
+          mo = fcMonthIndex(m[1]); d = Number(m[2]); y = m[3] ? Number(m[3]) : year;
+          rest = rest.replace(m[0], ' ');
+        }
+      }
+    }
+    if (mo != null && d != null) {
+      lastDate = { y: y || (lastDate ? lastDate.y : year), mo: mo, d: d };
+    } else if (lastDate) {
+      y = lastDate.y; mo = lastDate.mo; d = lastDate.d;
+    }
+    if (mo == null || d == null) {
+      skipped.push({ line: lineNo + 1, reason: 'no date' });
+      continue;
+    }
+
+    let hh = null, mm = 0;
+    m = rest.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+    if (m) {
+      hh = Number(m[1]) % 12;
+      mm = m[2] ? Number(m[2]) : 0;
+      if (/pm/i.test(m[3])) hh += 12;
+      rest = rest.replace(m[0], ' ');
+    } else {
+      m = rest.match(/\b(\d{1,2}):(\d{2})\b/);
+      if (m) {
+        hh = Number(m[1]); mm = Number(m[2]);
+        rest = rest.replace(m[0], ' ');
+      }
+    }
+    if (hh == null) {
+      skipped.push({ line: lineNo + 1, reason: 'no time' });
+      continue;
+    }
+
+    const flows = [];
+    const re = /(-?\d[\d,]*(?:\.\d+)?)\s*(?:cfs|ft\^?3\/s)?/gi;
+    let fm;
+    while ((fm = re.exec(rest)) !== null) {
+      const val = Number(fm[1].replace(/,/g, ''));
+      if (Number.isFinite(val)) flows.push(val);
+    }
+    if (!flows.length) {
+      skipped.push({ line: lineNo + 1, reason: 'no flow' });
+      continue;
+    }
+    const flow = flows[flows.length - 1];
+    pts.push({ t: fcPartsToMs(y, mo, d, hh, mm), v: Math.max(0, flow) });
+  }
+  return { points: normalizeReleasePoints(pts), skipped: skipped };
+}
+
+/* The requested example schedule (Nov 10–22), with the year chosen so
+   it is not in the past.  The release ends at 6 pm on Nov 22. */
+function exampleReleaseSchedulePoints() {
+  const now = new Date();
+  const year = (now.getMonth() > 10 || (now.getMonth() === 10 && now.getDate() > 22))
+    ? now.getFullYear() + 1
+    : now.getFullYear();
+  const mk = (mo, d, h, mi) => fcPartsToMs(year, mo, d, h, mi);
+  return [
+    { t: mk(11, 10, 6, 0), v: 250 },
+    { t: mk(11, 10, 18, 0), v: 500 },
+    { t: mk(11, 12, 8, 0), v: 1000 },
+    { t: mk(11, 12, 8, 30), v: 1500 },
+    { t: mk(11, 12, 9, 0), v: 2000 },
+    { t: mk(11, 12, 9, 30), v: 2500 },
+    { t: mk(11, 12, 10, 0), v: 3000 },
+    { t: mk(11, 20, 18, 0), v: 3000 },
+    { t: mk(11, 21, 6, 0), v: 1500 },
+    { t: mk(11, 22, 6, 0), v: 500 },
+    { t: mk(11, 22, 18, 0), v: 0 }
+  ];
+}
+
+/* The proposed schedule is either the active source hydrograph
+   (baseline-removed, hourly) or the custom release schedule. */
 function buildForecastSchedule() {
+  if (ReleaseScenario.mode === 'custom') return buildCustomReleaseSchedule();
   const src = gages.find((g) => g.id === CalibrationModel.sourceId);
   if (!src || !src.results || !eventStart || !eventEnd) return [];
   const pts = src.results.intervals.map((p) => ({ t: p.t, v: Math.max(0, p.q - p.base) }));
@@ -875,6 +1160,7 @@ function buildForecastSchedule() {
 function computeArrivalForecast(sourceSchedule, calibrationParams) {
   const m = CalibrationModel;
   const p = calibrationParams || m.tuning || {};
+  const customRelease = ReleaseScenario.mode === 'custom';
   const srcPts = (sourceSchedule || [])
     .map((r) => ({
       t: Number(r.t != null ? r.t : r.timestamp),
@@ -892,7 +1178,7 @@ function computeArrivalForecast(sourceSchedule, calibrationParams) {
   const ceff = fcClamp(numOr('conveyanceEfficiency', m.conveyanceEfficiency || FORECAST_DEFAULTS.conveyanceEfficiency), 0, 1);
   const season = fcClamp(numOr('seasonalityETFactor', m.seasonalityETFactor || FORECAST_DEFAULTS.seasonalityETFactor), 0.5, 1.5);
   const ante = fcClamp(numOr('antecedentMoistureFactor', m.antecedentMoistureFactor || FORECAST_DEFAULTS.antecedentMoistureFactor), 0.5, 1.5);
-  const scale = fcClamp(numOr('releaseScale', m.releaseScale || FORECAST_DEFAULTS.releaseScale), 0.1, 3);
+  const scale = customRelease ? 1 : fcClamp(numOr('releaseScale', m.releaseScale || FORECAST_DEFAULTS.releaseScale), 0.1, 3);
   const frontH = Math.max(1, numOr('frontLagHours', m.frontLagHours || FORECAST_DEFAULTS.frontLagHours));
   const crestH = Math.max(0, numOr('crestLagHours', m.crestLagHours || FORECAST_DEFAULTS.crestLagHours));
   const alpha = fcClamp(numOr('peakAttenuationRatio', m.peakAttenuationRatio || FORECAST_DEFAULTS.peakAttenuationRatio), 0.02, 1.5);
@@ -1012,14 +1298,13 @@ function computeArrivalForecast(sourceSchedule, calibrationParams) {
     const corr = targetArrAF / gridArrAF;
     for (const r of hourly) r.arrivingFlow *= corr;
   }
-  let cumRel = 0, cumArr = 0;
+  let cumArr = 0;
   for (let i = 0; i < hourly.length; i++) {
     if (i > 0) {
       const dtSec = (hourly[i].timestamp - hourly[i - 1].timestamp) / 1000;
-      cumRel += (hourly[i - 1].releaseFlow + hourly[i].releaseFlow) / 2 * dtSec / 43560;
       cumArr += (hourly[i - 1].arrivingFlow + hourly[i].arrivingFlow) / 2 * dtSec / 43560;
     }
-    hourly[i].cumReleaseAF = cumRel;
+    hourly[i].cumReleaseAF = integrateForecastTo(src, hourly[i].timestamp);
     hourly[i].cumArrivingAF = cumArr;
   }
 
@@ -1039,17 +1324,26 @@ function computeArrivalForecast(sourceSchedule, calibrationParams) {
     }
   }
   const last = hourly[hourly.length - 1];
-  const totalReleaseAF = last.cumReleaseAF;
+  const totalReleaseAF = vRelease;
   const totalArrivedAF = last.cumArrivingAF;
   const netRecoveryPct = totalReleaseAF > 0 ? (100 * totalArrivedAF) / totalReleaseAF : 0;
 
   // Daily volumetric accounting (calendar-day buckets).
   const dayMap = new Map();
+  // Release volume from the schedule start up to the first hourly grid
+  // point belongs to the start day; it precedes the first bucket.
+  const firstCumRel = hourly[0].cumReleaseAF;
+  if (firstCumRel > 0) {
+    const key = fcDayKey(srcStart);
+    let d = dayMap.get(key);
+    if (!d) { d = { date: fcDayLabel(srcStart), releaseAF: 0, arrivingAF: 0 }; dayMap.set(key, d); }
+    d.releaseAF += firstCumRel;
+  }
   for (let i = 1; i < hourly.length; i++) {
     const a = hourly[i - 1], b = hourly[i];
     const dtSec = (b.timestamp - a.timestamp) / 1000;
     if (!(dtSec > 0)) continue;
-    const relAF = (a.releaseFlow + b.releaseFlow) / 2 * dtSec / 43560;
+    const relAF = integrateForecastTo(src, b.timestamp) - integrateForecastTo(src, a.timestamp);
     const arrAF = (a.arrivingFlow + b.arrivingFlow) / 2 * dtSec / 43560;
     const key = fcDayKey(b.timestamp);
     let d = dayMap.get(key);
@@ -1074,7 +1368,14 @@ function computeArrivalForecast(sourceSchedule, calibrationParams) {
   }
 
   const notes = m.notes.slice();
-  if (Math.abs(scale - 1) > 1e-9) {
+  const rs = releaseScheduleSummary();
+  if (customRelease && rs) {
+    notes.push('Proposed release = custom schedule: ' + rs.count + ' change points, ' +
+      Math.round(rs.totalAF).toLocaleString('en-US') + ' AF total, ' +
+      fcDateTimeLocal(rs.startMs) + ' to ' + fcDateTimeLocal(rs.endMs) + ' ' + fcZoneAbbr() +
+      '. Each row holds until the next row; the release ends at the final row.');
+  }
+  if (!customRelease && Math.abs(scale - 1) > 1e-9) {
     notes.push('Proposed release = observed direct source hydrograph × ' + scale.toFixed(2) + '.');
   }
   if (vRelease <= ia) {
@@ -1112,6 +1413,10 @@ function computeArrivalForecast(sourceSchedule, calibrationParams) {
       seasonalityETFactor: season,
       antecedentMoistureFactor: ante,
       releaseScale: scale,
+      releaseMode: customRelease ? 'custom' : 'observed',
+      releaseTimeZone: fcZoneAbbr(),
+      releasePointCount: rs ? rs.count : 0,
+      releaseScheduleAF: rs ? rs.totalAF : null,
       modelFrontLagHours: frontH,
       modelCrestLagHours: crestH,
       modelPeakAttenuation: alpha,
@@ -1192,9 +1497,26 @@ function buildCsvText() {
     const fs = lastForecast.summary;
     L.push('# Source: ' + fs.sourceLabel + ' -> Target: ' + fs.targetLabel);
     L.push('# Calibration: ' + fs.calibrationSource);
-    L.push('# Scenario: release x' + fs.releaseScale.toFixed(2) +
-      ', seasonality x' + fs.seasonalityETFactor.toFixed(2) +
-      ', antecedent x' + fs.antecedentMoistureFactor.toFixed(2));
+    L.push('# Release scenario: ' + (fs.releaseMode === 'custom'
+      ? 'custom schedule (' + fs.releasePointCount + ' change points, ' +
+        Math.round(fs.releaseScheduleAF || 0).toLocaleString('en-US') + ' AF)'
+      : 'observed source hydrograph x' + fs.releaseScale.toFixed(2)));
+    L.push('# Scenario: seasonality x' + fs.seasonalityETFactor.toFixed(2) +
+      ', antecedent x' + fs.antecedentMoistureFactor.toFixed(2) +
+      '; forecast times: ' + fs.releaseTimeZone);
+    if (fs.releaseMode === 'custom') {
+      L.push('');
+      L.push('# CUSTOM RELEASE SCHEDULE (each flow holds until the next row; release ends at the final row)');
+      L.push('timestamp_utc,time_' + fs.releaseTimeZone + ',flow_cfs');
+      for (const p of normalizeReleasePoints(ReleaseScenario.points)) {
+        L.push([
+          new Date(p.t).toISOString(),
+          csvField(fcDateTimeLocal(p.t) + ' ' + fs.releaseTimeZone),
+          p.v.toFixed(2)
+        ].join(','));
+      }
+    }
+    L.push('');
     L.push('timestamp_utc,date_local,Release_Flow_cfs,Forecast_Dome_Flow_cfs,Release_Cumulative_AF,Cumulative_Dome_AF');
     for (const r of lastForecast.hourly) {
       L.push([
@@ -1441,9 +1763,13 @@ function buildReportHtml() {
     const fs = lastForecast.summary;
     html += '<h2>Downstream arrival forecast</h2>' +
       '<div class="meta">' + esc(fs.calibrationSource) + '<br/>' +
-      'Proposed release = observed direct source hydrograph × ' + fmtNum(fs.releaseScale, 2) +
+      'Proposed release = ' + (fs.releaseMode === 'custom'
+        ? 'custom schedule (' + fs.releasePointCount + ' change points, ' +
+          fmtNum(fs.releaseScheduleAF || 0, 0) + ' AF)'
+        : 'observed direct source hydrograph × ' + fmtNum(fs.releaseScale, 2)) +
       ' · seasonality ×' + fmtNum(fs.seasonalityETFactor, 2) +
-      ' · antecedent ×' + fmtNum(fs.antecedentMoistureFactor, 2) + '.</div>' +
+      ' · antecedent ×' + fmtNum(fs.antecedentMoistureFactor, 2) +
+      ' · forecast times: ' + esc(fs.releaseTimeZone) + '.</div>' +
       '<div class="kpi-grid">' +
       '<div class="kpi"><div class="kpi-label">Projected volume at ' + esc(fs.targetLabel) + '</div>' +
       '<div class="kpi-value">' + fmtNum(fs.totalArrivedAF, 0) + ' AF</div>' +
@@ -1453,16 +1779,24 @@ function buildReportHtml() {
       '<div class="kpi-sub">' + fmtNum(fs.totalReleaseAF, 0) + ' AF released · ' + fmtNum(fs.transmissionLossAF, 0) + ' AF lost</div></div>' +
       '<div class="kpi"><div class="kpi-label">Forecast peak at ' + esc(fs.targetLabel) + '</div>' +
       '<div class="kpi-value">' + fmtNum(fs.peakArrivingCfs, 0) + ' cfs</div>' +
-      '<div class="kpi-sub">' + esc(fmtDT(fs.peakArrivalMs)) + ' local</div></div>' +
+      '<div class="kpi-sub">' + esc(fcDateTimeLocal(fs.peakArrivalMs)) + ' ' + esc(fs.releaseTimeZone) + '</div></div>' +
       '<div class="kpi"><div class="kpi-label">First water arrival</div>' +
-      '<div class="kpi-value">' + esc(fmtDT(fs.frontArrivalMs)) + '</div>' +
+      '<div class="kpi-value">' + esc(fcDateTimeLocal(fs.frontArrivalMs)) + ' ' + esc(fs.releaseTimeZone) + '</div>' +
       '<div class="kpi-sub">' + (fs.frontLagHours != null ? fmtNum(fs.frontLagHours, 0) + ' h after release start' : 'no positive arrival projected') + '</div></div>' +
       '</div>';
+    if (fs.releaseMode === 'custom') {
+      html += '<h3>Release schedule (' + esc(fs.releaseTimeZone) + ')</h3>' +
+        '<table class="data-table"><thead><tr><th>Date &amp; time</th><th class="num">Flow (cfs)</th></tr></thead><tbody>';
+      for (const p of normalizeReleasePoints(ReleaseScenario.points)) {
+        html += '<tr><td>' + esc(fcDateTimeLocal(p.t)) + '</td><td class="num">' + fmtNum(p.v, 0) + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
     if (forecastChart && forecastChart.canvas && forecastChart.canvas.toDataURL) {
       html += '<img class="chart-img" alt="Release and projected downstream arrival hydrograph" src="' +
         forecastChart.canvas.toDataURL('image/png') + '"/>';
     }
-    html += '<h3>Daily volumetric accounting</h3><table class="data-table"><thead><tr><th>Date</th>' +
+    html += '<h3>Daily volumetric accounting (' + esc(fs.releaseTimeZone) + ')</h3><table class="data-table"><thead><tr><th>Date</th>' +
       '<th class="num">Dam Release (AF)</th><th class="num">Arrival at ' + esc(fs.targetLabel) + ' (AF)</th>' +
       '<th class="num">Estimated River Loss (AF)</th><th class="num">Cumulative Loss (AF)</th></tr></thead><tbody>';
     for (const d of lastForecast.daily) {
@@ -1577,7 +1911,10 @@ function saveConfig() {
         antecedentMoistureFactor: CalibrationModel.tuning.antecedentMoistureFactor,
         releaseScale: CalibrationModel.tuning.releaseScale
       },
-      tuningDirty: CalibrationModel.tuningDirty
+      tuningDirty: CalibrationModel.tuningDirty,
+      releaseMode: ReleaseScenario.mode,
+      timeZone: ReleaseScenario.timeZone,
+      schedule: normalizeReleasePoints(ReleaseScenario.points).map((p) => ({ t: p.t, v: p.v }))
     } : null,
     baselines: {},
     fills: {}
@@ -1607,7 +1944,7 @@ function saveConfig() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  showStatus('Configuration saved (<strong>' + a.download + '</strong>) — gages, data window, event window, baselines, gap fills, volume basis, lag and forecast tuning. Restore it any time with <strong>Load Config</strong>.', 'success');
+  showStatus('Configuration saved (<strong>' + a.download + '</strong>) — gages, data window, event window, baselines, gap fills, volume basis, lag, forecast tuning and the release scenario. Restore it any time with <strong>Load Config</strong>.', 'success');
 }
 
 function loadConfigFile(file) {
@@ -1719,6 +2056,13 @@ function applyPendingConfig() {
   if (cfg.forecast) {
     if (cfg.forecast.sourceId) forecastSourceId = cfg.forecast.sourceId;
     if (cfg.forecast.targetId) forecastTargetId = cfg.forecast.targetId;
+    ReleaseScenario.mode = cfg.forecast.releaseMode === 'custom' ? 'custom' : 'observed';
+    ReleaseScenario.timeZone = (cfg.forecast.timeZone && FORECAST_TIMEZONES[cfg.forecast.timeZone])
+      ? cfg.forecast.timeZone
+      : 'MST';
+    ReleaseScenario.points = Array.isArray(cfg.forecast.schedule)
+      ? normalizeReleasePoints(cfg.forecast.schedule)
+      : [];
   }
 
   computeAll();
@@ -1747,7 +2091,11 @@ function applyPendingConfig() {
     }
     CalibrationModel.tuningDirty = !!cfg.forecast.tuningDirty;
     renderForecast();
-    notes.push('forecast tuning');
+    notes.push(cfg.forecast.releaseMode === 'custom' ? 'forecast tuning + custom release schedule' : 'forecast tuning');
+  }
+
+  if (cfg.forecast && typeof renderReleaseScheduleEditor === 'function') {
+    renderReleaseScheduleEditor();
   }
 
   showStatus('Saved configuration applied — ' + (notes.length ? notes.join(' · ') : 'form settings') + '. Adjust anything and results update instantly.', 'success');

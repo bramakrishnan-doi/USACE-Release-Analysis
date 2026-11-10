@@ -179,6 +179,124 @@ const hLast = fc.hourly[fc.hourly.length - 1];
 assert(Math.abs(hLast.cumArrivingAF - fsum.totalArrivedAF) < 0.01, 'cumulative arrival closes the hourly grid');
 assert(Math.abs(fc.daily.reduce((a, d) => a + d.arrivingAF, 0) - fsum.totalArrivedAF) < 0.5, 'daily arrival sums to forecast total');
 
+// ---------- forecast timezone (MST / local / UTC) ----------
+ReleaseScenario.timeZone = 'MST';
+const mst6 = fcPartsToMs(2026, 11, 10, 6, 0);
+assert(mst6 === Date.UTC(2026, 10, 10, 13, 0), '6am MST maps to 13:00 UTC, got ' + new Date(mst6).toISOString());
+const mstParts = fcZonedParts(mst6);
+assert(mstParts.y === 2026 && mstParts.m === 11 && mstParts.d === 10 && mstParts.h === 6 && mstParts.min === 0,
+  'MST parts round-trip: ' + JSON.stringify(mstParts));
+const mstShown = new Date(mst6 + fcChartShiftMs(mst6));
+assert(mstShown.getHours() === 6 && mstShown.getMinutes() === 0,
+  'chart axis shift renders the MST clock, got ' + mstShown.toString());
+assert(fcDateTimeInputValue(mst6) === '2026-11-10T06:00', 'datetime-local value in MST: ' + fcDateTimeInputValue(mst6));
+assert(fcParseDateTimeInput('2026-11-10T06:00') === mst6, 'datetime-local parse in MST');
+
+ReleaseScenario.timeZone = 'LOCAL';
+assert(fcPartsToMs(2026, 11, 10, 6, 0) === new Date(2026, 10, 10, 6, 0).getTime(), 'LOCAL parts map to browser-local ms');
+assert(fcZoneAbbr() === 'local', 'local zone abbreviation');
+
+// ---------- custom release schedule parsing ----------
+ReleaseScenario.timeZone = 'MST';
+const parsed = parseReleaseScheduleText([
+  'Tuesday, 10 NOV at 6am MST - 250 cfs',
+  'Tuesday, 10 NOV at 6pm MST - 500 cfs',
+  'Wednesday, 11 NOV Maintain 500 cfs',
+  'Thursday, 12 NOV - Discharge will be increased:',
+  'At 8am MST - 1,000 cfs',
+  'At 8:30am MST - 1,500 cfs',
+  'At 9am MST - 2,000 cfs',
+  'At 9:30am MST - 2,500 cfs',
+  'At 10am MST - 3,000 cfs'
+].join(String.fromCharCode(10)), 2026);
+assert(parsed.points.length === 7, 'parser found 7 timed change points, got ' + parsed.points.length);
+assert(parsed.skipped.length === 2, 'parser skipped the two untimed hold lines, got ' + parsed.skipped.length);
+assert(parsed.points[0].t === Date.UTC(2026, 10, 10, 13, 0) && parsed.points[0].v === 250, 'first parsed point: 6am MST 250 cfs');
+assert(parsed.points[1].t === Date.UTC(2026, 10, 11, 1, 0) && parsed.points[1].v === 500, 'second parsed point: 6pm MST 500 cfs');
+assert(parsed.points[6].t === Date.UTC(2026, 10, 12, 17, 0) && parsed.points[6].v === 3000, 'last parsed point: 10am MST 3000 cfs');
+assert(parsed.points.every((p, i) => i === 0 || p.t > parsed.points[i - 1].t), 'parsed points strictly ordered');
+const isoParsed = parseReleaseScheduleText('2026-11-10 06:00, 250' + String.fromCharCode(10) + '2026-11-10 18:00, 500', 2026);
+assert(isoParsed.points.length === 2 && isoParsed.points[0].v === 250 && isoParsed.points[0].t === mst6, 'ISO paste parser');
+const normPts = normalizeReleasePoints([{ t: mst6 + 5, v: 10 }, { t: mst6, v: 1 }, { t: mst6 + 5, v: 20 }]);
+assert(normPts.length === 2 && normPts[0].v === 1 && normPts[1].v === 20, 'normalize sorts and last-wins duplicate times');
+
+// ---------- custom schedule hold/step semantics + volume ----------
+ReleaseScenario.mode = 'custom';
+const cst = Date.UTC(2026, 10, 10, 13, 0);
+ReleaseScenario.points = [
+  { t: cst, v: 250 },
+  { t: cst + 12 * H, v: 500 },
+  { t: cst + 36 * H, v: 1000 },
+  { t: cst + 37 * H, v: 0 }
+];
+const cs = buildCustomReleaseSchedule();
+assert(cs.length > 20, 'custom schedule hourly grid built, got ' + cs.length + ' points');
+const csAt = (t) => interpForecastPoints(cs, t);
+assert(csAt(cst) === 250, 'custom start flow 250 cfs');
+assert(csAt(cst + 12 * H - 1) === 250, '250 cfs holds until the next row');
+assert(csAt(cst + 12 * H) === 500, '500 cfs starts at the second row');
+assert(csAt(cst + 36 * H - 1) === 500, '500 cfs holds until the third row');
+assert(csAt(cst + 36 * H) === 1000, '1000 cfs starts at the third row');
+assert(csAt(cst + 37 * H) === 0, 'release ends at 0 cfs at the final row');
+const csSummary = releaseScheduleSummary();
+const csTheoAF = (250 * 12 + 500 * 24 + 1000 * 1) * 3600 / 43560;
+assert(csSummary.count === 4, 'schedule summary count, got ' + csSummary.count);
+assert(Math.abs(csSummary.totalAF - csTheoAF) < 0.01, 'step-schedule volume: got ' + csSummary.totalAF.toFixed(3) + ', expected ' + csTheoAF.toFixed(3));
+
+// Custom schedules bypass the observed-release scale but use the same routing/volume closure.
+const savedScale = CalibrationModel.tuning.releaseScale;
+CalibrationModel.tuning.releaseScale = 1.5;
+const cfc = computeArrivalForecast(buildForecastSchedule(), CalibrationModel.tuning);
+assert(cfc && cfc.summary.releaseMode === 'custom', 'custom forecast flagged');
+assert(cfc.summary.releaseScale === 1, 'custom schedule ignores the observed release scale');
+assert(cfc.summary.releasePointCount === 4, 'custom forecast reports 4 change points');
+assert(Math.abs(cfc.summary.totalReleaseAF - csSummary.totalAF) < 0.01, 'custom release volume preserved through routing');
+const cTarget = cfc.summary.conveyanceEfficiency * Math.max(0, cfc.summary.totalReleaseAF - cfc.summary.initialAbstractionAF) *
+  cfc.summary.seasonalityETFactor * cfc.summary.antecedentMoistureFactor;
+assert(Math.abs(cfc.summary.totalArrivedAF - cTarget) < 0.5, 'custom forecast volume closure');
+assert(Math.abs(cfc.hourly[cfc.hourly.length - 1].cumArrivingAF - cfc.summary.totalArrivedAF) < 0.01, 'custom cumulative arrival closes');
+assert(Math.abs(cfc.daily.reduce((a, d) => a + d.arrivingAF, 0) - cfc.summary.totalArrivedAF) < 0.5, 'custom daily arrival sums to total');
+assert(Math.abs(cfc.daily.reduce((a, d) => a + d.releaseAF, 0) - cfc.summary.totalReleaseAF) < 0.01, 'custom daily release sums to total');
+CalibrationModel.tuning.releaseScale = savedScale;
+
+// A schedule that starts between hourly marks still closes its daily release volume.
+ReleaseScenario.points = [
+  { t: cst + 15 * 60e3, v: 250 },
+  { t: cst + 2 * H + 15 * 60e3, v: 500 },
+  { t: cst + 3 * H + 15 * 60e3, v: 0 }
+];
+const offFc = computeArrivalForecast(buildForecastSchedule(), CalibrationModel.tuning);
+assert(offFc && offFc.summary.releasePointCount === 3, 'off-grid schedule forecast missing');
+assert(Math.abs(offFc.daily.reduce((a, d) => a + d.releaseAF, 0) - offFc.summary.totalReleaseAF) < 0.01,
+  'off-grid schedule daily release closes: ' + offFc.daily.reduce((a, d) => a + d.releaseAF, 0).toFixed(2) + ' vs ' + offFc.summary.totalReleaseAF.toFixed(2));
+assert(Math.abs(offFc.hourly[offFc.hourly.length - 1].cumReleaseAF - offFc.summary.totalReleaseAF) < 0.01,
+  'off-grid schedule cumulative release closes');
+
+// ---------- user's Nov 10-22 example schedule ----------
+ReleaseScenario.points = normalizeReleasePoints(exampleReleaseSchedulePoints());
+const exPts = ReleaseScenario.points;
+const exYear = fcZonedParts(exPts[0].t).y;
+assert(exPts.length === 11, 'example schedule has 11 change points, got ' + exPts.length);
+assert(exPts[0].t === fcPartsToMs(exYear, 11, 10, 6, 0) && exPts[0].v === 250, 'example starts Nov 10 6am MST at 250 cfs');
+assert(exPts[6].v === 3000 && exPts[7].v === 3000 && exPts[10].v === 0, 'example holds 3000 cfs then ends at 0');
+const ex = releaseScheduleSummary();
+assert(Math.abs(ex.totalAF - 703500 * 3600 / 43560) < 0.5, 'example release volume: got ' + ex.totalAF.toFixed(1) + ' AF');
+const exFc = computeArrivalForecast(buildForecastSchedule(), CalibrationModel.tuning);
+assert(exFc && exFc.summary.releasePointCount === 11, 'example schedule routed through the forecast engine');
+assert(exFc.summary.totalReleaseAF > 58000 && exFc.summary.totalReleaseAF < 58300,
+  'example release ~58,140 AF, got ' + exFc.summary.totalReleaseAF.toFixed(1));
+assert(exFc.summary.peakArrivingCfs > 0 && exFc.summary.frontArrivalMs != null, 'example forecast produces arrival KPIs');
+
+// Fewer than two change points is not a routable release.
+ReleaseScenario.points = [{ t: cst, v: 250 }];
+assert(buildCustomReleaseSchedule().length === 0, 'single-row schedule produces no routing series');
+assert(computeArrivalForecast(buildForecastSchedule(), CalibrationModel.tuning) === null, 'single-row schedule returns no forecast');
+
+// Restore observed mode for the remaining baseline tests.
+ReleaseScenario.mode = 'observed';
+ReleaseScenario.points = [];
+ReleaseScenario.timeZone = 'MST';
+
 // flat baseline path (24h of constant-50 pre data -> flat = 50 = manual)
 up.baseline.method = 'flat'; up.baseline.flatHours = 24;
 assert(buildBaselineRef(up, eventStart.getTime(), eventEnd.getTime()) && up.blCache.type === 'flat', 'flat baseline built');

@@ -30,7 +30,7 @@ Enter gage IDs (**8-digit USGS numbers, e.g. `09419800`**) in order; the **first
 
 - Fetches run in parallel; the retriever auto-follows OGC-API `rel="next"` cursor pages (10,000 records/page, up to 10 pages = 100,000 readings/gage). If the cap is hit you get a diagnostics note, not an error.
 - Gage metadata (name, drainage area, coordinates) comes from the `monitoring-locations` collection and feeds the tables, the upstream-scaling fill, and wave-speed estimates.
-- **Save Config / Load Config** — *Save Config* downloads a portable `usace-release-config-<date>-<time>.json` holding the gage list and order, the shared data window, the event window, per-gage baseline methods and parameters, gap-fill decisions, volume basis, max-lag setting, and the forecast source/target pair plus scenario tuning. *Load Config* restores that file: it refills the gage rows and dates, re-fetches the data, then re-applies the event window, baselines, fills, basis, lag, and forecast settings. Handy for recurring storm reviews or sharing an exact setup with a colleague.
+- **Save Config / Load Config** — *Save Config* downloads a portable `usace-release-config-<date>-<time>.json` holding the gage list and order, the shared data window, the event window, per-gage baseline methods and parameters, gap-fill decisions, volume basis, max-lag setting, and the forecast source/target pair plus scenario tuning, release mode, forecast timezone and any custom release schedule. *Load Config* restores that file: it refills the gage rows and dates, re-fetches the data, then re-applies the event window, baselines, fills, basis, lag, and forecast settings. Handy for recurring storm reviews or sharing an exact setup with a colleague.
 
 ### Step 2 — Select the event window
 All hydrographs overlay on one chart (gage colors: blue, amber, green, purple, red, teal). Click once on the chart to mark **event start**, click again for **event end** — the window applies to every gage. **"Suggest Largest Event"** auto-frames the biggest rise at the reference gage; click to adjust.
@@ -46,7 +46,7 @@ All hydrographs overlay on one chart (gage colors: blue, amber, green, purple, r
   Plus straight-line gage distance (mi) and implied wave speed (mph — an upper bound since river distance is longer).
 - **KPI cards** summarize the window, upstream/downstream volumes, ratio, crest travel time (peak-to-peak), and the **Operational lead time** (first-rise delay, first → last gage).
 - **Export Report (HTML)** — a self-contained, printable report file with the overlay hydrograph, volume bar chart, and forecast chart embedded as images (snapshot of exactly what's on screen, including gap shading and fills), the volume table, a travel-time table led by the **first-rise and peak-to-peak delays** (plus cross-correlation lag, distance, and wave speed), an *Operational lead time* KPI, forecast KPIs and daily accounting, a gage-metadata table, diagnostics, and method notes. The report intentionally omits the interactive configuration cards (forecast tuning, baseline separation, gap-fill editing). Open it in any browser — no server or internet needed.
-- **Export CSV** — summaries + travel rows + the hourly routed forecast (`timestamp_utc`, `date_local`, `Release_Flow_cfs`, `Forecast_Dome_Flow_cfs`, `Release_Cumulative_AF`, `Cumulative_Dome_AF`), the forecast daily accounting, and the full per-gage series (each reading flagged `measured` or with its fill method).
+- **Export CSV** — summaries + travel rows + the hourly routed forecast (`timestamp_utc`, `date_local`, `Release_Flow_cfs`, `Forecast_Dome_Flow_cfs`, `Release_Cumulative_AF`, `Cumulative_Dome_AF`), the forecast daily accounting, and the full per-gage series (each reading flagged `measured` or with its fill method). When a custom release schedule is active, the CSV also includes a `# CUSTOM RELEASE SCHEDULE` block with the change points and their UTC / forecast-timezone timestamps.
 
 Task and load summaries appear in the status boxes; global notes/warnings live under the results **Diagnostics** section.
 
@@ -68,15 +68,20 @@ The proposed source hydrograph is time-warped so the source first rise maps to t
 
 `V_Dome = max(0, C_eff × (V_proposed − I_a) × Φ_seasonality × Φ_antecedent)`
 
+**Release source modes:**
+- **Observed source** (default) — routes the observed source hydrograph over the selected event window; the release scale slider can be used to test a larger or smaller release.
+- **Custom schedule** — enter an explicit operational hydrograph. Each row is a **change time**: its flow holds constant until the next row, and the release ends at the final row. Add a later row to extend a hold, or a final `0 cfs` row to stop the release explicitly. Custom schedules bypass the observed release scale and are routed through the same calibrated time-warp, attenuation, diffusion and volume normalization. Use **Load example (Nov 10–22)** for a worked schedule, or paste one change per line (`2026-11-10 06:00, 250`); time-only lines inherit the last date seen, and lines without a time (such as "maintain 500 cfs") are skipped because the preceding flow already holds.
+- **Forecast timezone** — **MST/Arizona** (UTC−7, no DST; default), **browser local**, or **UTC**. Schedule rows, forecast KPIs, the forecast chart, and the daily accounting all use this zone; the observed-data cards elsewhere in the app remain browser-local. The MST default ensures a schedule written as "6am MST" is honored even on a machine set to another timezone.
+
 **Scenario controls** (they only change the forecast, never the observed-event results):
 - **Initial abstraction** slider (6,000–16,000 AF)
 - **Conveyance efficiency** slider (15–45%)
 - **Seasonality / ET factor** (1.00 neutral, 1.10 hot/high ET, 1.15 extreme ET)
 - **Antecedent moisture factor** (0.80–1.20)
-- **Proposed release scale** (50–200% of the observed source hydrograph)
+- **Proposed release scale** (50–200% of the observed source hydrograph; hidden and ignored for custom schedules)
 - **Reset tuning** restores the freshly calibrated values
 
-**Readout:** dual-axis chart (release and projected arrival flows on the left axis; cumulative release and arrival volumes on the right), KPI cards for projected volume at the target, net recovery, forecast peak, first water arrival, crest arrival, and lags; a daily volumetric table (dam release, arrival, river loss, cumulative loss, recovery); and routing notes with calibration caveats.
+**Readout:** dual-axis chart (release and projected arrival flows on the left axis; cumulative release and arrival volumes on the right), KPI cards for proposed release, projected volume at the target, net recovery, forecast peak, first water arrival, crest arrival, and lags; a daily volumetric table (dam release, arrival, river loss, cumulative loss, recovery); and routing notes with calibration caveats. All forecast times use the selected forecast timezone. When a custom schedule is active, the card also lists the schedule change points and the HTML report includes that table.
 
 ### Step 5 — Baseline separation (independent per gage)
 Direct storm volume = observed minus baseline, floored at zero. Methods per gage:
@@ -122,9 +127,9 @@ Apply per gap or batch (buttons fill **all** gaps / reset **all** fills). Filled
 
 ## Notes & caveats
 
-- Data are UTC instants from USGS; dialogs/chart axis render in your browser's local timezone.
+- Data are UTC instants from USGS; observed-data dialogs/charts render in your browser's local timezone. The forecast card has its own timezone selector (MST/Arizona, browser local, or UTC) for schedule entry and forecast readouts.
 - Provisional values may be revised by USGS.
 - Volume integration deliberately **does not guess** through unfilled gaps — the excluded share is flagged; fill gaps if you need the full window.
 - Wave velocities use straight-line gage separation, so they are upper bounds.
-- The arrival forecast is a **calibrated screening tool**, not a hydraulic routing model: it assumes the calibrated loss/routing behaviour transfers from the observed event to the proposed release, and it interpolates through any unfilled gaps in the source hydrograph. Verify with a HEC-RAS or comparable study before operational use.
+- The arrival forecast is a **calibrated screening tool**, not a hydraulic routing model: it assumes the calibrated loss/routing behaviour transfers from the observed event to the proposed release, and it interpolates through any unfilled gaps in the source hydrograph. A custom schedule is interpreted as instantaneous changes with constant holds; real gate operations ramp over minutes to hours, so add intermediate rows if the ramp shape matters. Verify with a HEC-RAS or comparable study before operational use.
 - Provisional, not a substitute for calibrated routing models or official Corps reporting.

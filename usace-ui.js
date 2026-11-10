@@ -5,6 +5,8 @@
    ============================================================ */
 'use strict';
 
+let releaseForecastTimer = null;
+
 /* ---------- Selection status helper ---------- */
 function setSelectionUi(html, type) {
   const el = document.getElementById('selStatus');
@@ -738,7 +740,9 @@ function initForecastChart() {
           bodyFont: { size: 12 },
           padding: 10,
           callbacks: {
-            title: (items) => items.length ? moment(items[0].parsed.x).format('YYYY-MM-DD HH:mm') + ' (local)' : '',
+            title: (items) => items.length
+              ? moment(items[0].parsed.x).format('YYYY-MM-DD HH:mm') + ' (' + fcZoneAbbr() + ')'
+              : '',
             label: (c) => {
               const ds = c.dataset || {};
               const v = c.parsed.y;
@@ -808,6 +812,171 @@ function refreshForecastGageOptions() {
   ).join('');
 }
 
+/* ---------- Custom release schedule editor ---------- */
+function syncReleaseScenarioUi() {
+  const custom = ReleaseScenario.mode === 'custom';
+  const obsPanel = document.getElementById('releaseObservedPanel');
+  const cusPanel = document.getElementById('releaseCustomPanel');
+  if (obsPanel) obsPanel.style.display = custom ? 'none' : 'block';
+  if (cusPanel) cusPanel.style.display = custom ? 'block' : 'none';
+
+  const obsBtn = document.getElementById('fcModeObserved');
+  const cusBtn = document.getElementById('fcModeCustom');
+  if (obsBtn) obsBtn.classList.toggle('on', !custom);
+  if (cusBtn) cusBtn.classList.toggle('on', custom);
+  document.querySelectorAll('input[name="fcReleaseMode"]').forEach((r) => {
+    r.checked = (r.value === 'custom') === custom;
+  });
+
+  // Release scale is meaningless for an explicit schedule.
+  const scaleCtl = document.getElementById('fcScaleControl');
+  if (scaleCtl) scaleCtl.classList.toggle('hidden', custom);
+
+  const tz = document.getElementById('fcTimeZone');
+  if (tz) tz.value = ReleaseScenario.timeZone;
+
+  document.querySelectorAll('[data-fc-zone]').forEach((el) => {
+    el.textContent = fcZoneAbbr();
+  });
+}
+
+function renderReleaseScheduleEditor() {
+  const body = document.getElementById('releaseScheduleBody');
+  if (!body) return;
+  const pts = normalizeReleasePoints(ReleaseScenario.points);
+  if (!pts.length) {
+    body.innerHTML = '<tr data-empty="1">' +
+      '<td><input type="datetime-local" class="input release-when" value="" /></td>' +
+      '<td><input type="number" class="input release-flow" min="0" step="1" value="" placeholder="cfs" /></td>' +
+      '<td></td></tr>';
+  } else {
+    body.innerHTML = pts.map((p, i) =>
+      '<tr data-idx="' + i + '">' +
+        '<td><input type="datetime-local" class="input release-when" value="' + esc(fcDateTimeInputValue(p.t)) + '" /></td>' +
+        '<td><input type="number" class="input release-flow" min="0" step="1" value="' + esc(String(Math.round(p.v * 100) / 100)) + '" /></td>' +
+        '<td><button type="button" class="release-row-del" data-release-del title="Remove row">×</button></td>' +
+      '</tr>'
+    ).join('');
+  }
+  renderReleaseScheduleSummary();
+}
+
+function readReleaseScheduleRows() {
+  const body = document.getElementById('releaseScheduleBody');
+  if (!body) return;
+  const pts = [];
+  body.querySelectorAll('tr').forEach((tr) => {
+    const when = tr.querySelector('.release-when');
+    const flow = tr.querySelector('.release-flow');
+    if (!when || !flow) return;
+    const t = fcParseDateTimeInput(when.value);
+    const v = Number(String(flow.value == null ? '' : flow.value).replace(/,/g, ''));
+    if (t != null && Number.isFinite(v)) pts.push({ t: t, v: Math.max(0, v) });
+  });
+  ReleaseScenario.points = normalizeReleasePoints(pts);
+}
+
+function renderReleaseScheduleSummary() {
+  const el = document.getElementById('releaseScheduleSummary');
+  if (!el) return;
+  const pts = normalizeReleasePoints(ReleaseScenario.points);
+  if (!pts.length) {
+    el.className = 'release-schedule-summary';
+    el.innerHTML = 'No schedule yet — add at least two rows, paste a schedule, or load the example.';
+    return;
+  }
+  if (pts.length < 2) {
+    el.className = 'release-schedule-summary warn';
+    el.innerHTML = 'Add at least one more row with a later time to define a release.';
+    return;
+  }
+  const s = releaseScheduleSummary();
+  let html = '<strong>' + fmtNum(s.count, 0) + '</strong> change points · peak <strong>' +
+    fmtNum(s.peakCfs, 0) + ' cfs</strong> · <strong>' + fmtNum(s.totalAF, 0) +
+    ' AF</strong> total release · ' + esc(fcDateTimeLocal(s.startMs)) + ' → ' +
+    esc(fcDateTimeLocal(s.endMs)) + ' ' + esc(fcZoneAbbr()) +
+    ' (' + fmtNum(s.durationHours / 24, 1) + ' days)';
+  if (s.lastFlowCfs > 0) {
+    html += '<br/><span style="color:#92400e">Release ends at the final row (' +
+      fmtNum(s.lastFlowCfs, 0) + ' cfs). Add a later row to extend it; use 0 cfs for the final stop.</span>';
+  }
+  el.className = 'release-schedule-summary' + (s.lastFlowCfs > 0 ? ' warn' : '');
+  el.innerHTML = html;
+}
+
+function scheduleEdited() {
+  readReleaseScheduleRows();
+  renderReleaseScheduleSummary();
+  if (releaseForecastTimer) clearTimeout(releaseForecastTimer);
+  releaseForecastTimer = setTimeout(function () {
+    releaseForecastTimer = null;
+    renderForecast();
+  }, 250);
+}
+
+function setReleaseMode(mode) {
+  if (mode !== 'observed' && mode !== 'custom') return;
+  ReleaseScenario.mode = mode;
+  syncReleaseScenarioUi();
+  renderReleaseScheduleEditor();
+  renderForecast();
+}
+
+function setForecastTimeZone(zone) {
+  if (!FORECAST_TIMEZONES[zone]) return;
+  ReleaseScenario.timeZone = zone;
+  // Keep the instants; reformat the wall-clock time in the new zone.
+  renderReleaseScheduleEditor();
+  syncReleaseScenarioUi();
+  renderForecast();
+}
+
+function addReleaseScheduleRow() {
+  readReleaseScheduleRows();
+  const pts = normalizeReleasePoints(ReleaseScenario.points);
+  const last = pts.length ? pts[pts.length - 1] : null;
+  const t = last ? last.t + 24 * 3600e3 : Math.ceil(Date.now() / 3600e3) * 3600e3;
+  const v = last ? last.v : 0;
+  ReleaseScenario.points = pts.concat([{ t: t, v: v }]);
+  renderReleaseScheduleEditor();
+  renderForecast();
+}
+
+function loadExampleReleaseSchedule() {
+  ReleaseScenario.timeZone = 'MST';
+  ReleaseScenario.mode = 'custom';
+  ReleaseScenario.points = normalizeReleasePoints(exampleReleaseSchedulePoints());
+  syncReleaseScenarioUi();
+  renderReleaseScheduleEditor();
+  renderForecast();
+  showStatus('Example release schedule loaded (Nov 10–22, MST). Edit any row, or paste your own schedule.', 'success');
+}
+
+function clearReleaseSchedule() {
+  ReleaseScenario.points = [];
+  renderReleaseScheduleEditor();
+  renderForecast();
+}
+
+function importReleaseSchedule() {
+  const input = document.getElementById('releasePasteInput');
+  const status = document.getElementById('releaseImportStatus');
+  const parsed = parseReleaseScheduleText(input ? input.value : '', fcZonedParts(Date.now()).y);
+  if (!parsed.points.length) {
+    if (status) status.innerHTML = '<span style="color:#991b1b">No valid rows found. Use one row per change, e.g. <code>2026-11-10 06:00, 250</code>.</span>';
+    return;
+  }
+  ReleaseScenario.mode = 'custom';
+  ReleaseScenario.points = parsed.points;
+  syncReleaseScenarioUi();
+  renderReleaseScheduleEditor();
+  renderForecast();
+  let msg = parsed.points.length + ' schedule rows imported in ' + fcZoneAbbr() + '.';
+  if (parsed.skipped.length) msg += ' ' + parsed.skipped.length + ' line(s) skipped (missing date or time).';
+  if (status) status.textContent = msg;
+  showStatus('Custom release schedule updated: ' + msg, 'success');
+}
+
 function renderForecastCalib() {
   const box = document.getElementById('forecastCalib');
   if (!box) return;
@@ -830,7 +999,9 @@ function renderForecastCalib() {
   let html = pills.map((p) =>
     '<span class="calib-pill">' + p[0] + ' <strong>' + esc(p[1]) + '</strong></span>'
   ).join('');
-  if (m.tuningDirty) {
+  if (ReleaseScenario.mode === 'custom') {
+    html += '<span class="calib-pill tuned">Custom release schedule — observed source replaced</span>';
+  } else if (m.tuningDirty) {
     html += '<span class="calib-pill tuned">Scenario tuned — forecast differs from calibration</span>';
   }
   box.innerHTML = html;
@@ -902,16 +1073,20 @@ function renderForecastKpis(fc, errMsg) {
     return;
   }
   const s = fc.summary;
+  const zone = fcZoneAbbr();
   let html = '';
+  html += kpi('Proposed release at ' + s.sourceLabel, fmtNum(s.totalReleaseAF, 0) + ' AF',
+    fmtNum(s.peakSourceCfs, 0) + ' cfs peak · ' +
+    (s.releaseMode === 'custom' ? 'custom schedule' : 'observed hydrograph ×' + fmtNum(s.releaseScale, 2)));
   html += kpi('Projected volume at ' + s.targetLabel, fmtNum(s.totalArrivedAF, 0) + ' AF',
     fmtNum(s.billionGallons, 2) + ' billion gallons · ' + fmtNum(s.netRecoveryPct, 1) + '% of release');
   html += kpi('Net recovery rate', fmtNum(s.netRecoveryPct, 1) + '%',
     fmtNum(s.totalReleaseAF, 0) + ' AF released · ' + fmtNum(s.transmissionLossAF, 0) + ' AF lost');
   html += kpi('Forecast peak at ' + s.targetLabel, fmtNum(s.peakArrivingCfs, 0) + ' cfs',
-    fmtDT(s.peakArrivalMs) + ' local' + (s.peakAttenuationRatio ? ' · ' + fmtNum(s.peakAttenuationRatio * 100, 0) + '% of source peak' : ''));
-  html += kpi('First water arrival', fmtDT(s.frontArrivalMs),
+    fcDateTimeLocal(s.peakArrivalMs) + ' ' + zone + (s.peakAttenuationRatio ? ' · ' + fmtNum(s.peakAttenuationRatio * 100, 0) + '% of source peak' : ''));
+  html += kpi('First water arrival', fcDateTimeLocal(s.frontArrivalMs) + ' ' + zone,
     s.frontLagHours != null ? fmtNum(s.frontLagHours, 0) + ' h after release start' : 'no positive arrival projected');
-  html += kpi('Crest arrival', fmtDT(s.peakArrivalMs),
+  html += kpi('Crest arrival', fcDateTimeLocal(s.peakArrivalMs) + ' ' + zone,
     s.crestLagHours != null ? fmtNum(s.crestLagHours, 0) + ' h after source peak' : '—');
   html += kpi('First water / crest lag', s.frontLagHours != null ? fmtNum(s.frontLagHours, 0) + ' h / ' + fmtNum(s.modelCrestLagHours, 0) + ' h' : '—',
     'calibrated front and crest routing');
@@ -932,10 +1107,17 @@ function updateForecastChart(fc) {
   initForecastChart();
   if (!forecastChart) return;
 
-  const flow = (key) => fc.hourly.map((r) => ({ x: r.timestamp, y: r[key] }));
+  // Shift the x values so the chart's local-time axis displays the
+  // selected forecast timezone (zero shift for browser-local).
+  const flow = (key) => fc.hourly.map((r) => ({
+    x: r.timestamp + fcChartShiftMs(r.timestamp), y: r[key]
+  }));
+  const releaseLabel = ReleaseScenario.mode === 'custom'
+    ? 'Custom release schedule'
+    : 'Release to river';
   forecastChart.data.datasets = [
     {
-      label: 'Release to river', fcLabel: 'Release', fcUnits: 'cfs',
+      label: releaseLabel, fcLabel: 'Release', fcUnits: 'cfs',
       data: flow('releaseFlow'),
       borderColor: '#0284c7', backgroundColor: 'rgba(2,132,199,0.10)',
       borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
@@ -1019,7 +1201,17 @@ function renderForecastNotes(fc) {
       ' h; source peak → downstream crest = ' + fmtNum(fc.summary.modelCrestLagHours, 1) +
       ' h; peak attenuation α = ' + fmtNum(fc.summary.modelPeakAttenuation, 2) +
       '; recession decay k = ' + fmtNum(fc.summary.modelDispersionK, 3) + ' h⁻¹.');
-    items.push('The hourly arrival series is numerically normalized so its integral equals Ceff × (Vrelease − Ia) × Φseasonality × Φantecedent. Daily volumes bucket that same hourly series by local calendar day.');
+    items.push('The hourly arrival series is numerically normalized so its integral equals Ceff × (Vrelease − Ia) × Φseasonality × Φantecedent. Daily volumes bucket that same hourly series by calendar day in the selected forecast timezone (' + fcZoneAbbr() + ').');
+  }
+  if (ReleaseScenario.mode === 'custom') {
+    const pts = normalizeReleasePoints(ReleaseScenario.points);
+    items.push('Forecast times use ' + fcTimeZone().label + '; custom schedules are not multiplied by the observed release scale.');
+    if (pts.length && pts[pts.length - 1].v > 0) {
+      items.push('The custom schedule ends at ' + fmtNum(pts[pts.length - 1].v, 0) +
+        ' cfs, so the release is treated as ending at that time. Add a later row (use 0 cfs) to extend or stop the release explicitly.');
+    }
+  } else {
+    items.push('Forecast times and daily buckets use ' + fcTimeZone().label + '. The observed-data cards elsewhere in the app remain browser-local.');
   }
   box.innerHTML = '<ul class="warn-list">' + items.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>';
 }
@@ -1062,6 +1254,7 @@ function renderForecast() {
   refreshForecastGageOptions();
   renderForecastCalib();
   syncForecastControls();
+  syncReleaseScenarioUi();
 
   if (!m.calibrated) {
     lastForecast = null;
@@ -1074,6 +1267,19 @@ function renderForecast() {
   }
 
   setForecastInputsDisabled(false);
+
+  // The custom schedule needs at least two change points to define a
+  // release (a start row and a later row).  Surface this clearly rather
+  // than routing an empty series.
+  if (ReleaseScenario.mode === 'custom' && normalizeReleasePoints(ReleaseScenario.points).length < 2) {
+    lastForecast = null;
+    renderForecastKpis(null, 'Add at least two custom release-schedule rows (a start time/flow and a later time/flow) to route the forecast.');
+    updateForecastChart(null);
+    renderForecastDaily(null);
+    renderForecastNotes(null);
+    return;
+  }
+
   const fc = computeArrivalForecast(buildForecastSchedule(), m.tuning);
   lastForecast = fc;
   renderForecastKpis(fc);
@@ -1137,6 +1343,55 @@ function wireForecastControls() {
     forecastTargetId = tgtSel.value;
     computeAll();
   });
+
+  // ---- Release scenario mode / timezone ----
+  document.querySelectorAll('input[name="fcReleaseMode"]').forEach((r) => {
+    r.addEventListener('change', () => {
+      if (r.checked) setReleaseMode(r.value);
+    });
+  });
+  const tzSel = document.getElementById('fcTimeZone');
+  if (tzSel) tzSel.addEventListener('change', () => setForecastTimeZone(tzSel.value));
+
+  // ---- Custom schedule editor ----
+  const body = document.getElementById('releaseScheduleBody');
+  if (body) {
+    body.addEventListener('input', (ev) => {
+      if (ev.target.closest('.release-when, .release-flow')) scheduleEdited();
+    });
+    body.addEventListener('change', (ev) => {
+      if (ev.target.closest('.release-when, .release-flow')) scheduleEdited();
+    });
+    body.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('[data-release-del]');
+      if (!btn) return;
+      const row = btn.closest('tr');
+      const rows = Array.from(body.querySelectorAll('tr'));
+      const delIdx = rows.indexOf(row);
+      // Read every remaining row directly so unsaved edits are preserved
+      // even when the deleted row shifts indexes.
+      const keep = [];
+      rows.forEach((tr, i) => {
+        if (i === delIdx) return;
+        const when = tr.querySelector('.release-when');
+        const flow = tr.querySelector('.release-flow');
+        const t = when ? fcParseDateTimeInput(when.value) : null;
+        const v = flow ? Number(String(flow.value == null ? '' : flow.value).replace(/,/g, '')) : NaN;
+        if (t != null && Number.isFinite(v)) keep.push({ t: t, v: Math.max(0, v) });
+      });
+      ReleaseScenario.points = normalizeReleasePoints(keep);
+      renderReleaseScheduleEditor();
+      renderForecast();
+    });
+  }
+  const addBtn = document.getElementById('btnReleaseAddRow');
+  if (addBtn) addBtn.addEventListener('click', addReleaseScheduleRow);
+  const exBtn = document.getElementById('btnReleaseExample');
+  if (exBtn) exBtn.addEventListener('click', loadExampleReleaseSchedule);
+  const clrBtn = document.getElementById('btnReleaseClear');
+  if (clrBtn) clrBtn.addEventListener('click', clearReleaseSchedule);
+  const impBtn = document.getElementById('btnReleaseImport');
+  if (impBtn) impBtn.addEventListener('click', importReleaseSchedule);
 }
 
 /* ============================================================
@@ -1296,6 +1551,8 @@ function init() {
   initChart();
   initBarChart();
   wireForecastControls();
+  renderReleaseScheduleEditor();
+  syncReleaseScenarioUi();
   setSelectionUi('Load gage data above, then click two points on the chart to define the storm start and end.', 'info');
 }
 

@@ -176,6 +176,55 @@ if (!forecastChart || forecastChart.data.datasets.length !== 4) {
 console.log('forecast OK: ' + fs.totalArrivedAF.toFixed(1) + ' AF arrives (' + fs.netRecoveryPct.toFixed(1) + '%), peak ' +
   fs.peakArrivingCfs.toFixed(1) + ' cfs, ' + lastForecast.daily.length + ' daily rows, CSV headers + dual-axis chart verified');
 
+// --- custom release schedule mode (user Nov 10-22 example, MST) ---
+ReleaseScenario.mode = 'custom';
+ReleaseScenario.timeZone = 'MST';
+ReleaseScenario.points = normalizeReleasePoints(exampleReleaseSchedulePoints());
+renderReleaseScheduleEditor();
+syncReleaseScenarioUi();
+renderForecast();
+if (!lastForecast || lastForecast.summary.releaseMode !== 'custom') {
+  throw new Error('custom mode did not produce a custom forecast');
+}
+const cfs = lastForecast.summary;
+if (cfs.releaseScale !== 1) throw new Error('custom schedule should force release scale to 1, got ' + cfs.releaseScale);
+if (cfs.releasePointCount !== 11) throw new Error('custom schedule should report 11 change points, got ' + cfs.releasePointCount);
+const scheduleAF = 703500 * 3600 / 43560;
+if (Math.abs(cfs.totalReleaseAF - scheduleAF) > 0.5) {
+  throw new Error('custom release volume wrong: ' + cfs.totalReleaseAF.toFixed(1) + ' vs ' + scheduleAF.toFixed(1) + ' AF');
+}
+const cTarget = cfs.conveyanceEfficiency * Math.max(0, cfs.totalReleaseAF - cfs.initialAbstractionAF) *
+  cfs.seasonalityETFactor * cfs.antecedentMoistureFactor;
+if (Math.abs(cfs.totalArrivedAF - cTarget) > 0.5) throw new Error('custom forecast volume normalization off');
+if (!(cfs.peakArrivingCfs > 0) || cfs.peakArrivalMs == null || cfs.frontArrivalMs == null) {
+  throw new Error('custom forecast routing KPIs missing');
+}
+const lastCustomRow = lastForecast.hourly[lastForecast.hourly.length - 1];
+if (Math.abs(lastCustomRow.cumReleaseAF - cfs.totalReleaseAF) > 0.01) throw new Error('custom cumulative release does not close');
+if (Math.abs(lastCustomRow.cumArrivingAF - cfs.totalArrivedAF) > 0.01) throw new Error('custom cumulative arrival does not close');
+const customDailyRel = lastForecast.daily.reduce((s, d) => s + d.releaseAF, 0);
+if (Math.abs(customDailyRel - cfs.totalReleaseAF) > 0.5) throw new Error('custom daily release does not sum to the schedule volume');
+if (forecastChart.data.datasets[0].label !== 'Custom release schedule') {
+  throw new Error('forecast chart release label should reflect custom mode: ' + forecastChart.data.datasets[0].label);
+}
+const chartShift = forecastChart.data.datasets[0].data[0].x - lastForecast.hourly[0].timestamp;
+if (chartShift !== fcChartShiftMs(lastForecast.hourly[0].timestamp)) {
+  throw new Error('forecast chart x-axis shift does not match the selected timezone');
+}
+if (document.getElementById('releaseScheduleBody').innerHTML.match(/data-idx=/g).length !== 11) {
+  throw new Error('release schedule editor did not render 11 rows');
+}
+if (document.getElementById('releaseScheduleSummary').innerHTML.indexOf('11</strong> change points') < 0) {
+  throw new Error('release schedule summary did not render the row count');
+}
+const csvCustom = buildCsvText();
+if (csvCustom.indexOf('# CUSTOM RELEASE SCHEDULE') < 0) throw new Error('CSV missing custom schedule block');
+if (csvCustom.indexOf('timestamp_utc,time_MST,flow_cfs') < 0) throw new Error('CSV custom schedule header/timezone missing');
+const firstCustomLabel = fcDateTimeLocal(ReleaseScenario.points[0].t) + ' MST';
+if (csvCustom.indexOf(firstCustomLabel) < 0) throw new Error('CSV custom schedule row missing: ' + firstCustomLabel);
+console.log('custom forecast OK: ' + cfs.releasePointCount + ' change points, ' + cfs.totalReleaseAF.toFixed(0) +
+  ' AF release, ' + cfs.totalArrivedAF.toFixed(1) + ' AF arrival, MST chart axis + CSV block verified');
+
 // --- HTML report build (excludes baseline/gap-fill cards; peak-to-peak primary) ---
 const report = buildReportHtml();
 if (!report || report.length < 2000) throw new Error('report html not built (len ' + (report ? report.length : 0) + ')');
@@ -189,7 +238,9 @@ for (const s of mustHave) {
 }
 if (report.indexOf('Fill action') >= 0) throw new Error('report leaked the gap-fill editor');
 if (report.indexOf('<select class="select-input-sm" data-gapgid') >= 0) throw new Error('report leaked interactive gap selects');
-console.log('report OK: ' + report.length.toLocaleString() + ' chars, peak-to-peak primary, no config cards');
+if (report.indexOf('Release schedule (MST)') < 0) throw new Error('report missing the custom release schedule table');
+if (report.indexOf('custom schedule (11 change points') < 0) throw new Error('report missing custom scenario metadata');
+console.log('report OK: ' + report.length.toLocaleString() + ' chars, peak-to-peak primary, custom schedule table, no config cards');
 
 // --- saved-configuration apply pipeline (staged config applied after load) ---
 pendingConfig = {
@@ -207,7 +258,14 @@ pendingConfig = {
       initialAbstractionAF: 9000, conveyanceEfficiency: 0.30,
       seasonalityETFactor: 1.15, antecedentMoistureFactor: 1.05, releaseScale: 1.25
     },
-    tuningDirty: true
+    tuningDirty: true,
+    releaseMode: 'custom',
+    timeZone: 'UTC',
+    schedule: [
+      { t: t0 + 12 * H, v: 300 },
+      { t: t0 + 24 * H, v: 900 },
+      { t: t0 + 30 * H, v: 0 }
+    ]
   }
 };
 applyPendingConfig();
@@ -227,7 +285,51 @@ if (CalibrationModel.tuning.initialAbstractionAF !== 9000 ||
     Math.abs(CalibrationModel.tuning.releaseScale - 1.25) > 1e-9) {
   throw new Error('config did not restore forecast tuning');
 }
-console.log('config apply OK: basis, baseline, gap fill, event window, lag, forecast tuning restored');
+if (ReleaseScenario.mode !== 'custom' || ReleaseScenario.timeZone !== 'UTC') {
+  throw new Error('config did not restore release mode/timezone: ' + ReleaseScenario.mode + '/' + ReleaseScenario.timeZone);
+}
+if (ReleaseScenario.points.length !== 3 || ReleaseScenario.points[1].v !== 900) {
+  throw new Error('config did not restore custom schedule points');
+}
+if (!lastForecast || lastForecast.summary.releaseMode !== 'custom' || lastForecast.summary.releaseTimeZone !== 'UTC') {
+  throw new Error('config apply did not re-route the custom schedule');
+}
+if (lastForecast.summary.releaseScale !== 1) throw new Error('custom config should ignore the observed release scale');
+console.log('config apply OK: basis, baseline, gap fill, event window, lag, forecast tuning + custom schedule restored');
+
+// --- saveConfig persists the custom release scenario ---
+const origQsa = document.querySelectorAll;
+document.querySelectorAll = (sel) => {
+  if (sel === '#gageRows .gage-row') {
+    return [
+      { getAttribute: () => 'cfg-a', querySelector: (q) => ({ value: q.indexOf('label') >= 0 ? 'Gage A' : '09419800' }) },
+      { getAttribute: () => 'cfg-b', querySelector: (q) => ({ value: q.indexOf('label') >= 0 ? 'Gage B' : '09520500' }) }
+    ];
+  }
+  return origQsa ? origQsa.call(document, sel) : [];
+};
+document.getElementById('startDateInput').value = '2023-03-01T00:00';
+document.getElementById('endDateInput').value = '2023-03-04T00:00';
+let savedCfgText = null;
+const RealBlob = Blob;
+Blob = class extends RealBlob {
+  constructor(parts, opts) {
+    super(parts, opts);
+    savedCfgText = String((parts && parts[0]) || '');
+  }
+};
+saveConfig();
+document.querySelectorAll = origQsa;
+if (!savedCfgText) throw new Error('saveConfig did not produce a config blob');
+const savedCfg = JSON.parse(savedCfgText);
+if (!savedCfg.forecast || savedCfg.forecast.releaseMode !== 'custom' || savedCfg.forecast.timeZone !== 'UTC') {
+  throw new Error('saved config missing release mode/timezone');
+}
+if (!Array.isArray(savedCfg.forecast.schedule) || savedCfg.forecast.schedule.length !== 3 ||
+    savedCfg.forecast.schedule[1].v !== 900) {
+  throw new Error('saved config missing custom schedule points');
+}
+console.log('config save OK: release mode, timezone and custom schedule persisted in JSON');
 `;
 try {
   vm.runInContext(driver, ctx, { filename: 'loadtest-driver.js' });
