@@ -10,15 +10,9 @@ Single-folder, no-build app (HTML + 2 JS assets, Chart.js from cdnjs). All data 
 
 ### Method 1 — 1-Click (recommended)
 1. Double-click **`run.bat`**.
-2. It starts a local server (Node via `npx http-server`, or falls back to Python), then opens `http://localhost:3000`.
+2. It starts a local server, then opens `http://localhost:3000`.
 
-### Method 2 — Terminal
-Serves from this folder with any static server, e.g.:
-```cmd
-npx --yes http-server -p 3000
-```
-
-### Method 3 — Direct open
+### Method 2 — Direct open
 Double-click `index.html`. If your browser blocks the USGS API from a `file://` page, use Method 1. Published configurations also require the app to be served over HTTP.
 
 ---
